@@ -6,8 +6,9 @@
 //! result is cached in the state folder, so the check runs at most once a day
 //! however many windows or launches there are.
 //!
-//! Debug builds don't check unless `DRIFT_UPDATE_CHECK=1`; `DRIFT_UPDATE_CHECK=0`
-//! turns it off in any build.
+//! The daily check can be turned off in Settings. `DRIFT_UPDATE_CHECK=0|1`
+//! overrides that setting; debug builds don't check unless it is `1`.
+//! "Check for Updates" (status bar, Settings, command palette) always checks.
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -24,12 +25,12 @@ pub struct Update {
     pub url: String,
 }
 
-/// Whether checking is turned on for this build.
-pub fn enabled() -> bool {
+/// Whether the daily check is turned on.
+pub fn enabled(cx: &gpui::App) -> bool {
     match std::env::var("DRIFT_UPDATE_CHECK").as_deref() {
         Ok("0") => false,
         Ok("1") => true,
-        _ => !cfg!(debug_assertions),
+        _ => !cfg!(debug_assertions) && cx.global::<crate::settings::Settings>().check_updates,
     }
 }
 
@@ -93,14 +94,14 @@ pub struct Available(pub Option<Update>);
 impl gpui::Global for Available {}
 
 /// Shows the last known update straight away, then checks once a day for as
-/// long as the app runs.
+/// long as the app runs (while the check is turned on).
 pub fn start(cx: &mut gpui::App) {
     cx.set_global(Available(cached()));
-    if !enabled() {
-        return;
-    }
     cx.spawn(async move |cx| loop {
-        if due() {
+        let Ok(on) = cx.update(|cx| enabled(cx)) else {
+            break;
+        };
+        if on && due() {
             let found = cx.background_executor().spawn(async { check() }).await;
             if let Ok(found) = found {
                 let alive = cx.update(|cx| publish(found, cx));

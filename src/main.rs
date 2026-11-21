@@ -1,4 +1,4 @@
-//! Drift: a fast, git-only desktop client.
+//! Drift: a fast, Git desktop client.
 
 // Release builds on Windows are GUI apps: no console window opens next to Drift.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -9,6 +9,7 @@ mod fuzzy;
 mod git;
 mod merge;
 mod recent;
+mod settings;
 mod syntax;
 mod theme;
 mod ui;
@@ -34,6 +35,7 @@ fn main() {
     Application::new()
         .with_assets(assets::Assets)
         .run(move |cx: &mut App| {
+            cx.set_global(settings::Settings::load());
             let installed = cx.text_system().all_font_names();
             let ui_font = pick_font(
                 &installed,
@@ -71,8 +73,7 @@ fn main() {
             if cfg!(not(any(target_os = "macos", target_os = "windows"))) {
                 cx.set_prompt_builder(ui::prompt::themed_prompt);
             }
-            cx.bind_keys(ui::text_input::key_bindings());
-            cx.bind_keys(ui::actions_bindings());
+            ui::shortcuts::apply(cx);
 
             update::start(cx);
             ui::open_window(start, None, cx);

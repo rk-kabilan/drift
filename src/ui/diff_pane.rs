@@ -39,9 +39,14 @@ impl Workspace {
             let msg = if self.staged.is_empty() && self.unstaged.is_empty() {
                 "Nothing to commit. The working tree is clean."
             } else {
-                "Select a file to see its changes, or press Cmd+P to find one."
+                "Select a file to see its changes."
             };
-            let msg = msg.replace("Cmd", super::workspace::secondary_key());
+            let msg = match super::shortcuts::label("QuickOpen", cx) {
+                Some(keys) if !self.unstaged.is_empty() || !self.staged.is_empty() => {
+                    format!("Select a file to see its changes, or press {keys} to find one.")
+                }
+                _ => msg.to_string(),
+            };
             return pane.child(
                 div()
                     .flex_1()
@@ -501,8 +506,8 @@ impl Workspace {
                     .w(px(18.))
                     .h(px(18.))
                     .tooltip(tooltip(format!(
-                        "Close ({}+W)",
-                        super::workspace::secondary_key()
+                        "Close{}",
+                        super::shortcuts::hint("CloseTab", cx)
                     )));
                     if tab.draft.is_some() {
                         // Unsaved: a dot that turns into the close button on hover.
@@ -649,8 +654,8 @@ impl Workspace {
                             button("save-draft", "Save", true)
                                 .mr(px(8.))
                                 .tooltip(tooltip(format!(
-                                    "Write these edits to disk ({}+S)",
-                                    super::workspace::secondary_key()
+                                    "Write these edits to disk{}",
+                                    super::shortcuts::hint("Save", cx)
                                 )))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     if let Some(a) = this.active {
@@ -692,7 +697,10 @@ impl Workspace {
                             cx,
                             cx.listener(|this, _, _, cx| this.jump_change(false, cx)),
                         )
-                        .tooltip(tooltip("Previous Change (Shift+F7)")),
+                        .tooltip(tooltip(format!(
+                            "Previous Change{}",
+                            super::shortcuts::hint("PreviousChange", cx)
+                        ))),
                     )
                     .child(
                         icon_button(
@@ -702,7 +710,10 @@ impl Workspace {
                             cx,
                             cx.listener(|this, _, _, cx| this.jump_change(true, cx)),
                         )
-                        .tooltip(tooltip("Next Change (F7)")),
+                        .tooltip(tooltip(format!(
+                            "Next Change{}",
+                            super::shortcuts::hint("NextChange", cx)
+                        ))),
                     )
                     .child(
                         icon_button(

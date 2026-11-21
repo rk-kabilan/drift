@@ -1,6 +1,6 @@
 # Drift
 
-A fast, git-only desktop client written in Rust with [GPUI](https://gpui.rs), the GPU-accelerated UI framework behind Zed. It runs on macOS, Windows and Linux.
+A fast Git desktop client written in Rust with [GPUI](https://gpui.rs), the GPU-accelerated UI framework behind Zed. It runs on macOS, Windows and Linux.
 
 Drift does one thing: review and commit changes. There is no editor, file search or extension system.
 
@@ -57,21 +57,40 @@ The macOS app is signed ad hoc, which runs on your own Mac. To share builds with
 `.github/workflows/release.yml` builds every package on GitHub's macOS, Windows and Linux machines and publishes them as a GitHub Release. To release, set `version` in `Cargo.toml`, commit, and push a matching tag:
 
 ```sh
-git tag v1.0.0
-git push origin v1.0.0
+git tag v0.1.0
+git push origin v0.1.0
 ```
 
 The workflow stops if the tag and `Cargo.toml` disagree. Running it by hand from the Actions tab builds the packages as downloadable artifacts without publishing anything.
 
 ### Updates
 
-Once a day Drift checks the repository's latest GitHub Release (with the system's `curl`, so the app carries no HTTP code). When a newer version exists, the status bar and the welcome screen show "Drift x.y.z available", linking to the download page. "Check for Updates…" in the command palette checks right away. Installing the new package replaces the old version; settings and recent repositories are kept. Debug builds don't check unless `DRIFT_UPDATE_CHECK=1`, and `DRIFT_UPDATE_CHECK=0` turns the check off. Release downloads must be public for this to work.
+Once a day Drift checks the repository's latest GitHub Release (with the system's `curl`, so the app carries no HTTP code). When a newer version exists, the status bar and the welcome screen show "Drift x.y.z available", linking to the download page. The update icon in the status bar, "Check Now" in Settings and "Settings: Check for Updates…" in the command palette check right away. Installing the new package replaces the old version; settings and recent repositories are kept. The daily check can be turned off in Settings; `DRIFT_UPDATE_CHECK=0` or `1` overrides that, and debug builds don't check unless it is `1`. Release downloads must be public for this to work.
 
 ### App icon
 
 The icon lives in `assets/app-icon/` (`drift.svg` is the master; `drift-macos.svg` is the macOS version on Apple's icon grid). `build.rs` embeds `windows/drift.ico` and the "Drift" product name into `drift.exe`; the macOS script puts `macos/drift.icns` in the app; the Linux packages install the hicolor icons and `drift.desktop`, whose name matches the window's app id (`drift`).
 
+## Settings
+
+Open Settings with `Cmd+,` / `Ctrl+,`, the gear in the status bar, or "Settings: Open Settings" in the command palette.
+
+- **General**: theme (System, Light or Dark; the sun/moon button in the status bar switches too) and the automatic update check.
+- **Keyboard Shortcuts**: every action that can have a shortcut. Click Change and press the new keys (Esc cancels), Remove to leave an action without one, Reset to go back to the default. Shortcuts need Ctrl, Alt or Cmd, or a function key. Two actions with the same keys are flagged.
+
+Settings are saved to `settings` in the state folder (macOS `~/Library/Application Support/drift/`, Windows `%APPDATA%\drift\`, Linux `~/.local/state/drift/`), as `key=value` lines:
+
+```
+theme=dark
+check_updates=true
+key.CommandPalette=ctrl-k
+```
+
+`DRIFT_THEME=light|dark` still pins the theme a window starts with.
+
 ## Keyboard
+
+Defaults (change them in Settings → Keyboard Shortcuts):
 
 | Keys | Action |
 | --- | --- |
@@ -81,6 +100,9 @@ The icon lives in `assets/app-icon/` (`drift.svg` is the master; `drift-macos.sv
 | `F5`, `Ctrl+R` / `Cmd+R` | Refresh |
 | `Ctrl+O` / `Cmd+O` | Open a repository in a new window (or bring its window forward) |
 | `Ctrl+Shift+N` / `Cmd+Shift+N` | New window |
+| `Ctrl+Shift+P` / `Cmd+Shift+P`, `F1` | Command palette |
+| `Ctrl+P` / `Cmd+P` | Go to file |
+| `Ctrl+,` / `Cmd+,` | Settings |
 | `Ctrl+Q` / `Cmd+Q` | Quit |
 
 ## Layout of the code
@@ -96,6 +118,9 @@ The icon lives in `assets/app-icon/` (`drift.svg` is the master; `drift-macos.sv
 | `assets/app-icon/` | App icon for macOS (`.icns`), Windows (`.ico`, embedded by `build.rs`) and Linux (hicolor PNGs, SVG, `.desktop`) |
 | `scripts/` | Packaging scripts for macOS, Linux and Windows |
 | `src/update.rs` | Daily check for a newer release |
+| `src/settings.rs` | Settings file: theme, update check, shortcut overrides |
+| `src/ui/shortcuts.rs` | Shortcut table, defaults and rebinding |
+| `src/ui/settings_panel.rs` | The Settings panel |
 | `.github/workflows/release.yml` | Builds and publishes a release when a `v*` tag is pushed |
 | `patches/xattr` | Local copy of `xattr` 0.2.3 (pulled in by GPUI) fixed for current `libc` on Linux |
 

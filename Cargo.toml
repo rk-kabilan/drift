@@ -1,8 +1,8 @@
 [package]
 name = "drift"
-version = "1.0.0"
+version = "0.1.0"
 edition = "2021"
-description = "A fast, git-only desktop client built with Rust and GPUI"
+description = "A fast, Git desktop client built with Rust and GPUI"
 license = "MIT"
 build = "build.rs"
 

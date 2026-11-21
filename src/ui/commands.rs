@@ -1,5 +1,6 @@
-//! The command palette (Cmd+Shift+P): every git command by name, like VS Code's
-//! "Git: …" commands. Commands that need more input chain pickers and prompts.
+//! The command palette (Cmd/Ctrl+Shift+P): every command by name, grouped like
+//! VS Code's "Git: …", "File: …" and "Settings: …" commands. Commands that need
+//! more input chain pickers and prompts.
 
 use gpui::{prelude::*, Context, PromptLevel, Window};
 
@@ -35,6 +36,7 @@ commands! {
     Clone => "Clone...",
     CloseRepository => "Close Repository",
     CloseAllDiffs => "Close All Diff Editors",
+    ColorTheme => "Color Theme...",
     Commit => "Commit",
     CommitAmend => "Commit (Amend)",
     CommitSignedOff => "Commit (Signed Off)",
@@ -62,11 +64,13 @@ commands! {
     FetchPrune => "Fetch (Prune)",
     FetchAll => "Fetch From All Remotes",
     Init => "Initialize Repository...",
+    KeyboardShortcuts => "Keyboard Shortcuts",
     MergeBranch => "Merge Branch...",
     NewWindow => "New Window",
     OpenAllChanges => "Open All Changes",
     OpenRecent => "Open Recent Repository...",
     OpenRepository => "Open Repository...",
+    OpenSettings => "Open Settings",
     OpenStagedChanges => "Open Staged Changes",
     PopLatestStash => "Pop Latest Stash",
     PopStash => "Pop Stash...",
@@ -96,23 +100,67 @@ commands! {
     Sync => "Sync",
     SyncRebase => "Sync (Rebase)",
     ToggleBlame => "Toggle Git Blame Status Bar Item",
+    ToggleTheme => "Toggle Light/Dark Theme",
     UndoLastCommit => "Undo Last Commit",
     UnstageAll => "Unstage All Changes",
     UnstageChanges => "Unstage Changes",
 }
 
 impl Cmd {
-    /// Whether the command works on an open repository (the rest open one).
+    /// Whether the command works on an open repository (the rest open one, or
+    /// are about the app).
     fn needs_repo(self) -> bool {
         !matches!(
             self,
             Cmd::CheckForUpdates
                 | Cmd::Clone
+                | Cmd::ColorTheme
                 | Cmd::Init
+                | Cmd::KeyboardShortcuts
                 | Cmd::NewWindow
                 | Cmd::OpenRecent
                 | Cmd::OpenRepository
+                | Cmd::OpenSettings
+                | Cmd::ToggleTheme
         )
+    }
+
+    /// The group shown before the title, as in "Git: Commit".
+    pub fn category(self) -> &'static str {
+        match self {
+            Cmd::CheckForUpdates
+            | Cmd::ColorTheme
+            | Cmd::KeyboardShortcuts
+            | Cmd::OpenSettings
+            | Cmd::ToggleTheme => "Settings",
+            Cmd::CloseRepository
+            | Cmd::NewWindow
+            | Cmd::OpenRecent
+            | Cmd::OpenRepository
+            | Cmd::RevertUnsaved
+            | Cmd::SaveAll
+            | Cmd::SaveChanges => "File",
+            _ => "Git",
+        }
+    }
+
+    /// The key-bindable action this command runs, if it has one.
+    fn shortcut_id(self) -> Option<&'static str> {
+        Some(match self {
+            Cmd::CheckForUpdates => "CheckForUpdates",
+            Cmd::OpenSettings => "OpenSettings",
+            Cmd::ToggleTheme => "ToggleTheme",
+            Cmd::NewWindow => "NewWindow",
+            Cmd::OpenRepository => "OpenRepository",
+            Cmd::SaveChanges => "Save",
+            Cmd::Commit => "Commit",
+            Cmd::Refresh => "Refresh",
+            Cmd::Fetch => "Fetch",
+            Cmd::Pull => "Pull",
+            Cmd::Push => "Push",
+            Cmd::Sync => "Sync",
+            _ => return None,
+        })
     }
 }
 
@@ -152,12 +200,18 @@ impl Workspace {
             .iter()
             .enumerate()
             .map(|(i, cmd)| PickerItem {
-                haystack: format!("Git: {}", cmd.title()),
+                haystack: format!("{}: {}", cmd.category(), cmd.title()),
                 label_start: 0,
                 note: String::new(),
                 icon: "",
                 icon_color: None,
-                badge: (i == 0 && has_recent).then(|| ("recently used".to_string(), t.muted)),
+                badge: if i == 0 && has_recent {
+                    Some(("recently used".to_string(), t.muted))
+                } else {
+                    cmd.shortcut_id()
+                        .and_then(|id| super::shortcuts::label(id, cx))
+                        .map(|keys| (keys, t.faint))
+                },
                 section: has_recent.then_some(if i < recent_len {
                     "Recently used"
                 } else {
@@ -166,7 +220,7 @@ impl Workspace {
             })
             .collect();
         let picker = cx.new(|cx| {
-            let mut p = Picker::new("Type a git command", "No matching commands.", items, cx)
+            let mut p = Picker::new("Type a command", "No matching commands.", items, cx)
                 .with_query_prefix(">", cx);
             p.set_query(query.unwrap_or_else(|| ">".into()), cx);
             p
@@ -211,6 +265,16 @@ impl Workspace {
             Cmd::CloseRepository => self.close_repo(window, cx),
             Cmd::NewWindow => self.new_window(window, cx),
             Cmd::CheckForUpdates => self.check_for_updates(window, cx),
+
+            // ---- settings ----
+            Cmd::OpenSettings => {
+                self.open_settings(super::settings_panel::Page::General, window, cx)
+            }
+            Cmd::KeyboardShortcuts => {
+                self.open_settings(super::settings_panel::Page::Shortcuts, window, cx)
+            }
+            Cmd::ToggleTheme => self.toggle_theme(window, cx),
+            Cmd::ColorTheme => self.pick_theme(window, cx),
 
             // ---- commit ----
             Cmd::Commit => self.commit_cmd(Scope::Smart, no_opts, window, cx),

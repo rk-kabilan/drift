@@ -17,20 +17,9 @@ impl Workspace {
         &mut self,
         _window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> gpui::Div {
         let t = cx.theme().clone();
         let fg = t.on_accent;
-        let hover = gpui::white().opacity(0.12);
-        let item = |id: &'static str| {
-            div()
-                .id(id)
-                .flex()
-                .items_center()
-                .gap(px(5.))
-                .px(px(8.))
-                .whitespace_nowrap()
-                .hover(move |s| s.bg(hover))
-        };
 
         let mut bar = div()
             .h(px(24.))
@@ -41,7 +30,9 @@ impl Workspace {
             .text_size(px(12.));
 
         if self.repo.is_none() {
-            return bar;
+            // The welcome screen keeps the app-wide items on the right.
+            bar = bar.child(div().flex_1());
+            return self.status_bar_app_items(bar, cx);
         }
 
         let head = &self.head;
@@ -62,8 +53,8 @@ impl Workspace {
                         if head.dirty { "*" } else { "" }
                     ))
                     .tooltip(tooltip(format!(
-                        "Switch branch ({}+Shift+B)",
-                        super::workspace::secondary_key()
+                        "Switch branch{}",
+                        super::shortcuts::hint("SwitchBranch", cx)
                     )))
                     .on_click(
                         cx.listener(|this, _, window, cx| this.open_branch_picker(window, cx)),
@@ -162,14 +153,58 @@ impl Workspace {
             }
             bar = bar.child(item("sb-lang").child(Lang::name_for_path(&diff.change.path)));
         }
+        self.status_bar_app_items(bar, cx)
+    }
+
+    /// Update check, settings and theme: shown with or without a repository.
+    fn status_bar_app_items(&mut self, mut bar: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
+        let t = cx.theme().clone();
+        let fg = t.on_accent;
         if let Some(update) = cx.global::<crate::update::Available>().0.clone() {
             bar = bar.child(
                 item("sb-update")
                     .cursor_pointer()
-                    .child(icon_sized("arrow-down", 14., fg))
+                    .child(icon_sized("update", 14., fg))
                     .child(format!("Drift {} available", update.version))
                     .tooltip(tooltip("Open the download page"))
                     .on_click(move |_, _, cx| cx.open_url(&update.url)),
+            );
+        } else {
+            let checking = self.checking_updates;
+            let update_icon = svg()
+                .path("icons/update.svg")
+                .size(px(14.))
+                .flex_none()
+                .text_color(fg);
+            // A gentle pulse while the check runs.
+            let update_icon = if checking {
+                update_icon
+                    .with_animation(
+                        "update-pulse",
+                        Animation::new(Duration::from_millis(1000)).repeat(),
+                        |svg, delta| svg.opacity(0.35 + 0.65 * (1.0 - (delta * 2.0 - 1.0).abs())),
+                    )
+                    .into_any_element()
+            } else {
+                update_icon.into_any_element()
+            };
+            bar = bar.child(
+                item("sb-check-updates")
+                    .when(!checking, |d| d.cursor_pointer())
+                    .child(update_icon)
+                    .tooltip(tooltip(if checking {
+                        "Checking for updates…".to_string()
+                    } else {
+                        format!(
+                            "Check for Updates{}",
+                            super::shortcuts::hint("CheckForUpdates", cx)
+                        )
+                    }))
+                    .when(!checking, |d| {
+                        d.on_click(
+                            cx.listener(|this, _, window, cx| this.check_for_updates(window, cx)),
+                        )
+                    }),
             );
         }
         let theme_icon = if t.appearance == Appearance::Dark {
@@ -178,11 +213,36 @@ impl Workspace {
             "moon"
         };
         bar.child(
+            item("sb-settings")
+                .cursor_pointer()
+                .child(icon_sized("settings", 14., fg))
+                .tooltip(tooltip(format!(
+                    "Settings{}",
+                    super::shortcuts::hint("OpenSettings", cx)
+                )))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.open_settings(super::settings_panel::Page::General, window, cx)
+                })),
+        )
+        .child(
             item("sb-theme")
                 .cursor_pointer()
                 .child(icon_sized(theme_icon, 14., fg))
                 .tooltip(tooltip("Toggle light/dark theme"))
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_theme(cx))),
+                .on_click(cx.listener(|this, _, window, cx| this.toggle_theme(window, cx))),
         )
     }
+}
+
+/// A status bar item: icon and text with a hover highlight.
+fn item(id: &'static str) -> gpui::Stateful<gpui::Div> {
+    let hover = gpui::white().opacity(0.12);
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .gap(px(5.))
+        .px(px(8.))
+        .whitespace_nowrap()
+        .hover(move |s| s.bg(hover))
 }

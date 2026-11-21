@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use gpui::{
-    actions, div, prelude::*, px, Context, Entity, FocusHandle, Focusable, KeyBinding, PromptLevel,
+    actions, div, prelude::*, px, Context, Entity, FocusHandle, Focusable, PromptLevel,
     UniformListScrollHandle, Window,
 };
 
@@ -40,6 +40,8 @@ actions!(
         Save,
         OpenRepository,
         NewWindow,
+        OpenSettings,
+        CheckForUpdates,
         Quit
     ]
 );
@@ -69,11 +71,12 @@ pub fn open_window(
             ..Default::default()
         },
         move |window, cx| {
-            // DRIFT_THEME=light|dark pins the theme; otherwise it follows the OS.
+            // DRIFT_THEME=light|dark pins the theme; otherwise the Settings
+            // choice applies, which by default follows the OS.
             let forced = match std::env::var("DRIFT_THEME").as_deref() {
                 Ok("dark") => Some(Appearance::Dark),
                 Ok("light") => Some(Appearance::Light),
-                _ => None,
+                _ => cx.global::<crate::settings::Settings>().theme.forced(),
             };
             let appearance = forced.unwrap_or_else(|| Appearance::from(window.appearance()));
             let state = cx.global_mut::<ThemeState>();
@@ -129,27 +132,6 @@ const SIDEBAR_MIN: f32 = 200.;
 const DIFF_MIN: f32 = 320.;
 /// Hit area of the divider between the panes (also the gap between them).
 const DIVIDER: f32 = 6.;
-
-pub fn actions_bindings() -> Vec<KeyBinding> {
-    vec![
-        KeyBinding::new("secondary-enter", Commit, None),
-        KeyBinding::new("secondary-r", Refresh, None),
-        KeyBinding::new("f5", Refresh, None),
-        KeyBinding::new("f7", NextChange, None),
-        KeyBinding::new("shift-f7", PreviousChange, None),
-        KeyBinding::new("secondary-p", QuickOpen, None),
-        KeyBinding::new("secondary-shift-p", CommandPalette, None),
-        KeyBinding::new("f1", CommandPalette, None),
-        KeyBinding::new("secondary-shift-b", SwitchBranch, None),
-        KeyBinding::new("secondary-w", CloseTab, None),
-        KeyBinding::new("ctrl-tab", NextTab, None),
-        KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
-        KeyBinding::new("secondary-q", Quit, None),
-        KeyBinding::new("secondary-s", Save, None),
-        KeyBinding::new("secondary-o", OpenRepository, None),
-        KeyBinding::new("secondary-shift-n", NewWindow, None),
-    ]
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CommitMode {
@@ -275,7 +257,7 @@ pub struct Draft {
 const BINARY: &str = "(binary file)";
 
 pub(super) const UNSAVED_BEFORE_COMMIT: &str =
-    "Some diffs have unsaved edits. Save (Cmd/Ctrl+S) or discard them before committing.";
+    "Some diffs have unsaved edits. Save or discard them before committing.";
 
 fn fingerprint(old: &str, new: &str) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -328,6 +310,10 @@ pub struct Workspace {
     pub(super) scroll_axis: Option<(bool, std::time::Instant)>,
     /// Vertical offset held while a sideways gesture runs.
     pub(super) lock_y: f32,
+    /// The settings panel, while it is open.
+    pub(super) settings: Option<super::settings_panel::SettingsView>,
+    /// An update check started from the status bar or Settings is running.
+    pub(super) checking_updates: bool,
     focus_handle: FocusHandle,
     _picker_subscription: Option<gpui::Subscription>,
     _tasks: Vec<gpui::Task<()>>,
@@ -429,6 +415,8 @@ impl Workspace {
             char_width: None,
             scroll_axis: None,
             lock_y: 0.,
+            settings: None,
+            checking_updates: false,
             focus_handle: cx.focus_handle(),
             _picker_subscription: None,
             _tasks: vec![poll],
@@ -569,11 +557,10 @@ impl Workspace {
         };
         self.load_active_tab();
 
-        let message_placeholder = format!(
-            "Message ({}+Enter to commit on '{}')",
-            secondary_key(),
-            self.head.branch
-        );
+        let message_placeholder = match super::shortcuts::label("Commit", cx) {
+            Some(keys) => format!("Message ({keys} to commit on '{}')", self.head.branch),
+            None => format!("Message (commit on '{}')", self.head.branch),
+        };
         self.message
             .update(cx, |m, cx| m.set_placeholder(message_placeholder, cx));
         cx.notify();
@@ -1573,6 +1560,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.menu = None;
+        // A picker replaces the Settings panel (e.g. the command palette opened from it).
+        self.settings = None;
         self._picker_subscription = Some(cx.subscribe_in(
             &picker,
             window,
@@ -1612,14 +1601,29 @@ impl Workspace {
         }
     }
 
-    pub fn toggle_theme(&mut self, cx: &mut Context<Self>) {
-        let state = cx.global_mut::<ThemeState>();
-        let next = match state.theme.appearance {
-            Appearance::Light => Appearance::Dark,
-            Appearance::Dark => Appearance::Light,
+    /// Switches between light and dark, and remembers the choice in Settings.
+    pub fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let next = match cx.theme().appearance {
+            Appearance::Light => crate::settings::ThemeChoice::Dark,
+            Appearance::Dark => crate::settings::ThemeChoice::Light,
         };
-        state.forced = Some(next);
-        state.theme = Theme::for_appearance(next);
+        self.set_theme(next, window, cx);
+    }
+
+    /// Applies a theme choice to every window and saves it in Settings.
+    pub fn set_theme(
+        &mut self,
+        choice: crate::settings::ThemeChoice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let appearance = choice
+            .forced()
+            .unwrap_or_else(|| Appearance::from(window.appearance()));
+        let state = cx.global_mut::<ThemeState>();
+        state.forced = choice.forced();
+        state.theme = Theme::for_appearance(appearance);
+        crate::settings::update(cx, |s| s.theme = choice);
         cx.refresh_windows();
     }
 
@@ -1710,14 +1714,6 @@ impl Workspace {
                         .child(control("win-close", "close", cx, |w| w.remove_window())),
                 )
             })
-    }
-}
-
-pub fn secondary_key() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "Cmd"
-    } else {
-        "Ctrl"
     }
 }
 
@@ -1879,7 +1875,9 @@ impl Render for Workspace {
                 };
                 this.set_layout(next, cx)
             }))
-            .on_action(cx.listener(|this, _: &ToggleTheme, _, cx| this.toggle_theme(cx)))
+            .on_action(
+                cx.listener(|this, _: &ToggleTheme, window, cx| this.toggle_theme(window, cx)),
+            )
             .on_action(
                 cx.listener(|this, _: &QuickOpen, window, cx| this.open_file_picker(window, cx)),
             )
@@ -1916,6 +1914,12 @@ impl Render for Workspace {
                 let cascade = window.window_bounds().get_bounds();
                 cx.defer(move |cx| open_window(None, Some(cascade), cx));
             }))
+            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
+                this.open_settings(super::settings_panel::Page::General, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CheckForUpdates, window, cx| {
+                this.check_for_updates(window, cx)
+            }))
             .on_action(cx.listener(|_, _: &Quit, _, cx| cx.defer(quit)))
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -1940,6 +1944,7 @@ impl Render for Workspace {
             .when(!show_title_bar, |d| d.pt(px(6.)))
             .child(body)
             .child(self.render_status_bar(window, cx))
+            .children(self.render_settings(window, cx))
             .children(self.picker.as_ref().map(|picker| {
                 // Click outside the picker to close it.
                 div()

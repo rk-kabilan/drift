@@ -29,12 +29,6 @@ fn logo() -> Arc<Image> {
     .clone()
 }
 
-const OPEN_KEYS: &str = if cfg!(target_os = "macos") {
-    "⌘O"
-} else {
-    "Ctrl+O"
-};
-
 /// The folder name a clone of `url` gets, as `git clone` would pick it.
 fn clone_name(url: &str) -> String {
     let url = url.trim().trim_end_matches(['/', '\\']);
@@ -258,12 +252,19 @@ impl Workspace {
 
     /// Checks for a newer release now and says what it found.
     pub fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.checking_updates {
+            return;
+        }
+        self.checking_updates = true;
+        cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let found = cx
                 .background_executor()
                 .spawn(async { crate::update::check() })
                 .await;
-            this.update_in(cx, |_, window, cx| {
+            this.update_in(cx, |this, window, cx| {
+                this.checking_updates = false;
+                cx.notify();
                 let current = env!("CARGO_PKG_VERSION");
                 match found {
                     Ok(Some(update)) => {
@@ -379,7 +380,7 @@ impl Workspace {
         let action = |id: &'static str,
                       icon: &'static str,
                       label: &'static str,
-                      keys: Option<&'static str>,
+                      keys: Option<String>,
                       cx: &mut Context<Self>,
                       run: fn(&mut Self, &mut Window, &mut Context<Self>)| {
             row(id.into())
@@ -479,7 +480,7 @@ impl Workspace {
                             .child(
                                 div()
                                     .text_color(t.muted)
-                                    .child("A fast, git-only desktop client"),
+                                    .child("A fast, Git desktop client"),
                             ),
                     ),
             )
@@ -533,7 +534,7 @@ impl Workspace {
                 "welcome-open",
                 "open",
                 "Open Repository…",
-                Some(OPEN_KEYS),
+                super::shortcuts::label("OpenRepository", cx),
                 cx,
                 Self::open_repo_dialog,
             ))
