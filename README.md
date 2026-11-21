@@ -34,18 +34,27 @@ sudo apt install libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-
 
 **macOS** needs Xcode command line tools; **Windows** needs the MSVC build tools.
 
-## App icon and packaging
+## Packaging
 
-The icon lives in `assets/app-icon/` (`drift.svg` is the master; `drift-macos.svg` is the macOS version on Apple's icon grid).
+One command per platform builds a release and packages it into `target/release/<platform>/`. Each package has to be built on its own OS.
 
-- **Windows:** `build.rs` embeds `windows/drift.ico` (16 to 256 px) into `drift.exe`, so Explorer, the taskbar and Alt+Tab show it with a plain `cargo build`.
-- **macOS:** a bare binary has no Dock icon. `scripts/package-macos.sh` builds `Drift.app` (with `macos/drift.icns`) and a drag-to-Applications `.dmg` in `target/release/macos/`, using only `codesign` and `hdiutil` from macOS. The app is signed ad hoc, so it runs on your own Mac; to share it, sign it with a Developer ID and notarize it. Pass `--no-dmg` for the app alone.
-- **Linux:** desktops find the icon through `drift.desktop`. The window's app id (and X11 `WM_CLASS`) is `drift`, which matches that file. Use `cargo bundle --release --format deb` for a `.deb`, or install by hand:
-  ```sh
-  install -Dm755 target/release/drift ~/.local/bin/drift
-  cp -r assets/app-icon/linux/hicolor ~/.local/share/icons/
-  install -Dm644 assets/app-icon/linux/drift.desktop ~/.local/share/applications/drift.desktop
-  ```
+| Platform | Command | Output |
+| --- | --- | --- |
+| macOS | `scripts/package-macos.sh` | `Drift.app` and `Drift-<version>.dmg` (drag to Applications) |
+| Linux | `scripts/package-linux.sh` | `drift-<version>-linux-<arch>.tar.gz` (with `install.sh`), a `.deb` when `dpkg-deb` exists, an `.rpm` when `rpmbuild` exists, an AppImage when `appimagetool` is on `PATH` |
+| Windows | `powershell -ExecutionPolicy Bypass -File scripts\package-windows.ps1` | `Drift-<version>-windows-<arch>.zip` (portable) and `Drift-<version>-setup-<arch>.exe` when [Inno Setup 6](https://jrsoftware.org/isinfo.php) is installed |
+
+`scripts/package.sh` picks the right one for the machine it runs on (on Windows, from Git Bash). Options:
+
+- All scripts: `--no-build` (`-NoBuild` on Windows) packages the existing release binary.
+- macOS: `--no-dmg` for the app alone; `--universal` for one app that runs on Apple silicon and Intel Macs (first `rustup target add aarch64-apple-darwin x86_64-apple-darwin`).
+- Linux: set `DRIFT_MAINTAINER="Name <email>"` for the `.deb` maintainer field. Build on the oldest distro you want to support, since the binary needs that glibc or newer.
+
+The macOS app is signed ad hoc, which runs on your own Mac. To share builds without warnings, sign and notarize the app with an Apple Developer ID, and sign the Windows exe and installer with `signtool`.
+
+### App icon
+
+The icon lives in `assets/app-icon/` (`drift.svg` is the master; `drift-macos.svg` is the macOS version on Apple's icon grid). `build.rs` embeds `windows/drift.ico` and the "Drift" product name into `drift.exe`; the macOS script puts `macos/drift.icns` in the app; the Linux packages install the hicolor icons and `drift.desktop`, whose name matches the window's app id (`drift`).
 
 ## Keyboard
 
@@ -70,6 +79,7 @@ The icon lives in `assets/app-icon/` (`drift.svg` is the master; `drift-macos.sv
 | `src/ui/` | GPUI views: workspace, changes pane, diff pane, status bar, commit message input, dialog |
 | `assets/icons/` | SVG icons, compiled into the binary |
 | `assets/app-icon/` | App icon for macOS (`.icns`), Windows (`.ico`, embedded by `build.rs`) and Linux (hicolor PNGs, SVG, `.desktop`) |
+| `scripts/` | Packaging scripts for macOS, Linux and Windows |
 | `patches/xattr` | Local copy of `xattr` 0.2.3 (pulled in by GPUI) fixed for current `libc` on Linux |
 
 Run the tests with `cargo test`.

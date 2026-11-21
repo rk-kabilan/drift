@@ -659,6 +659,13 @@ impl Repo {
 
 fn run_git(root: &Path, args: &[&str], stdin: Option<&str>) -> Result<String> {
     let mut cmd = Command::new("git");
+    // A GUI app on Windows would otherwise flash a console window for each git run.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
     cmd.current_dir(root)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")

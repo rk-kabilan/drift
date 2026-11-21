@@ -2,8 +2,11 @@
 # Builds Drift.app and a drag-to-Applications .dmg for macOS, using only the
 # tools that ship with macOS and Xcode's command line tools.
 #
-#   scripts/package-macos.sh            # app + dmg in target/release/macos/
-#   scripts/package-macos.sh --no-dmg   # app only
+#   scripts/package-macos.sh               app + dmg in target/release/macos/
+#   scripts/package-macos.sh --no-dmg      app only
+#   scripts/package-macos.sh --universal   one app for Apple silicon and Intel Macs
+#                                          (first: rustup target add x86_64-apple-darwin aarch64-apple-darwin)
+#   scripts/package-macos.sh --no-build    package the existing release binary
 #
 # The app is signed ad hoc, which is enough to run it on this Mac. To give it to
 # other people, sign it with a Developer ID and notarize it instead.
@@ -19,11 +22,35 @@ VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
 OUT=target/release/macos
 APP="$OUT/$NAME.app"
 
-cargo build --release
+DMG_WANTED=1 UNIVERSAL=0 BUILD=1
+for arg in "$@"; do
+  case "$arg" in
+    --no-dmg) DMG_WANTED=0 ;;
+    --universal) UNIVERSAL=1 ;;
+    --no-build) BUILD=0 ;;
+    *) echo "Unknown option: $arg" >&2; exit 1 ;;
+  esac
+done
+
+EXE="target/release/$BIN"
+if [[ $UNIVERSAL == 1 ]]; then
+  if [[ $BUILD == 1 ]]; then
+    cargo build --release --target aarch64-apple-darwin
+    cargo build --release --target x86_64-apple-darwin
+  fi
+  mkdir -p "$OUT"
+  EXE="$OUT/$BIN-universal"
+  lipo -create -output "$EXE" \
+    "target/aarch64-apple-darwin/release/$BIN" "target/x86_64-apple-darwin/release/$BIN"
+elif [[ $BUILD == 1 ]]; then
+  cargo build --release
+fi
+[[ -x "$EXE" ]] || { echo "$EXE is missing; build it first." >&2; exit 1; }
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "target/release/$BIN" "$APP/Contents/MacOS/$BIN"
+cp "$EXE" "$APP/Contents/MacOS/$BIN"
+if [[ $UNIVERSAL == 1 ]]; then rm -f "$EXE"; fi
 cp assets/app-icon/macos/drift.icns "$APP/Contents/Resources/$BIN.icns"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
@@ -50,7 +77,7 @@ PLIST
 codesign --force --deep --sign - "$APP"
 echo "Built $APP"
 
-if [[ "${1:-}" == "--no-dmg" ]]; then
+if [[ $DMG_WANTED == 0 ]]; then
   exit 0
 fi
 

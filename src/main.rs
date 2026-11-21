@@ -1,5 +1,8 @@
 //! Drift: a fast, git-only desktop client.
 
+// Release builds on Windows are GUI apps: no console window opens next to Drift.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod assets;
 mod diff;
 mod fuzzy;
