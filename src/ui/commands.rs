@@ -31,6 +31,8 @@ commands! {
     Checkout => "Checkout to...",
     CheckoutDetached => "Checkout to (Detached)...",
     CherryPick => "Cherry Pick...",
+    Clone => "Clone...",
+    CloseRepository => "Close Repository",
     CloseAllDiffs => "Close All Diff Editors",
     Commit => "Commit",
     CommitAmend => "Commit (Amend)",
@@ -58,8 +60,11 @@ commands! {
     Fetch => "Fetch",
     FetchPrune => "Fetch (Prune)",
     FetchAll => "Fetch From All Remotes",
+    Init => "Initialize Repository...",
     MergeBranch => "Merge Branch...",
     OpenAllChanges => "Open All Changes",
+    OpenRecent => "Open Recent Repository...",
+    OpenRepository => "Open Repository...",
     OpenStagedChanges => "Open Staged Changes",
     PopLatestStash => "Pop Latest Stash",
     PopStash => "Pop Stash...",
@@ -94,6 +99,16 @@ commands! {
     UnstageChanges => "Unstage Changes",
 }
 
+impl Cmd {
+    /// Whether the command works on an open repository (the rest open one).
+    fn needs_repo(self) -> bool {
+        !matches!(
+            self,
+            Cmd::Clone | Cmd::Init | Cmd::OpenRecent | Cmd::OpenRepository
+        )
+    }
+}
+
 /// Which files a commit takes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Scope {
@@ -110,17 +125,22 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.repo.is_none() {
-            return;
-        }
         let t = cx.theme().clone();
-        let mut order: Vec<Cmd> = self.recent_commands.clone();
+        let available = |c: &Cmd| self.repo.is_some() || !c.needs_repo();
+        let mut order: Vec<Cmd> = self
+            .recent_commands
+            .iter()
+            .copied()
+            .filter(available)
+            .collect();
+        let recent_len = order.len();
         order.extend(
             Cmd::ALL
                 .iter()
-                .filter(|c| !self.recent_commands.contains(c)),
+                .copied()
+                .filter(|c| available(c) && !self.recent_commands.contains(c)),
         );
-        let has_recent = !self.recent_commands.is_empty();
+        let has_recent = recent_len > 0;
         let items = order
             .iter()
             .enumerate()
@@ -131,7 +151,7 @@ impl Workspace {
                 icon: "",
                 icon_color: None,
                 badge: (i == 0 && has_recent).then(|| ("recently used".to_string(), t.muted)),
-                section: has_recent.then_some(if i < self.recent_commands.len() {
+                section: has_recent.then_some(if i < recent_len {
                     "Recently used"
                 } else {
                     "Other commands"
@@ -159,6 +179,9 @@ impl Workspace {
     }
 
     pub fn run_command(&mut self, cmd: Cmd, window: &mut Window, cx: &mut Context<Self>) {
+        if cmd.needs_repo() && self.repo.is_none() {
+            return;
+        }
         self.recent_commands.retain(|c| *c != cmd);
         self.recent_commands.insert(0, cmd);
         self.recent_commands.truncate(5);
@@ -173,6 +196,13 @@ impl Workspace {
             ..no_opts
         };
         match cmd {
+            // ---- repositories ----
+            Cmd::OpenRepository => self.open_repo_dialog(window, cx),
+            Cmd::OpenRecent => self.open_recent_picker(window, cx),
+            Cmd::Clone => self.clone_repo_dialog(window, cx),
+            Cmd::Init => self.new_repo_dialog(window, cx),
+            Cmd::CloseRepository => self.close_repo(window, cx),
+
             // ---- commit ----
             Cmd::Commit => self.commit_cmd(Scope::Smart, no_opts, window, cx),
             Cmd::CommitAmend => self.commit_cmd(Scope::Smart, amend, window, cx),

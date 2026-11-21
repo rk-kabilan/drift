@@ -5,6 +5,7 @@ mod diff;
 mod fuzzy;
 mod git;
 mod merge;
+mod recent;
 mod syntax;
 mod theme;
 mod ui;
@@ -22,12 +23,13 @@ use crate::ui::Workspace;
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     git::limit_memory();
-    let root = std::env::args_os()
+    // `drift <path>` opens that repository. Otherwise the repository around the
+    // current folder opens if there is one, else the welcome screen shows.
+    let start = std::env::args_os()
         .nth(1)
-        .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."));
-    let root = std::fs::canonicalize(&root).unwrap_or(root);
+        .map(|p| (PathBuf::from(p), true))
+        .or_else(|| std::env::current_dir().ok().map(|p| (p, false)))
+        .map(|(p, named)| (std::fs::canonicalize(&p).unwrap_or(p), named));
 
     Application::new()
         .with_assets(assets::Assets)
@@ -98,18 +100,11 @@ fn main() {
                         let state = cx.global_mut::<ThemeState>();
                         state.theme = Theme::for_appearance(appearance);
                         state.forced = forced;
-                        cx.new(|cx| Workspace::new(root.clone(), window, cx))
+                        cx.new(|cx| Workspace::new(start.clone(), window, cx))
                     },
                 )
                 .expect("failed to open the main window");
-            window
-                .update(cx, |ws, window, cx| {
-                    use gpui::Focusable as _;
-                    let handle = ws.message_focus(cx);
-                    window.focus(&handle);
-                    let _ = ws.focus_handle(cx);
-                })
-                .ok();
+            let _ = window;
             cx.on_window_closed(|cx| {
                 if cx.windows().is_empty() {
                     cx.quit();

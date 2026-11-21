@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=drift
+GenericName=Git Client
+Comment=A fast, git-only desktop client
+Exec=drift %F
+Icon=drift
+Terminal=false
+Categories=Development;RevisionControl;
+StartupWMClass=drift

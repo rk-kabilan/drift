@@ -154,6 +154,25 @@ impl Workspace {
                                     true,
                                     |this, window, cx| this.open_command_palette(None, window, cx),
                                 ),
+                                MenuItem::separator(),
+                                MenuItem::new(
+                                    "mi-open-repo",
+                                    "Open Repository…",
+                                    !busy,
+                                    |this, window, cx| this.open_repo_dialog(window, cx),
+                                ),
+                                MenuItem::new(
+                                    "mi-recent-repo",
+                                    "Open Recent Repository…",
+                                    !busy,
+                                    |this, window, cx| this.open_recent_picker(window, cx),
+                                ),
+                                MenuItem::new(
+                                    "mi-close-repo",
+                                    "Close Repository",
+                                    !busy,
+                                    |this, window, cx| this.close_repo(window, cx),
+                                ),
                             ],
                             cx,
                         ))

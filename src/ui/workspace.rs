@@ -38,6 +38,7 @@ actions!(
         Push,
         Sync,
         Save,
+        OpenRepository,
         Quit
     ]
 );
@@ -58,6 +59,7 @@ pub fn actions_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
         KeyBinding::new("secondary-q", Quit, None),
         KeyBinding::new("secondary-s", Save, None),
+        KeyBinding::new("secondary-o", OpenRepository, None),
     ]
 }
 
@@ -198,7 +200,10 @@ fn fingerprint(old: &str, new: &str) -> u64 {
 pub struct Workspace {
     pub(super) repo: Option<Repo>,
     pub(super) root: PathBuf,
-    pub(super) open_error: Option<String>,
+    /// Why the last attempt to open a repository failed, shown on the welcome screen.
+    pub(super) welcome_error: Option<String>,
+    /// Recently opened repositories, newest first.
+    pub(super) recent: Vec<PathBuf>,
     pub(super) head: HeadInfo,
     pub(super) staged: Vec<FileChange>,
     pub(super) unstaged: Vec<FileChange>,
@@ -236,15 +241,13 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    pub fn new(root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (repo, open_error) = match Repo::discover(&root) {
-            Ok(r) => (Some(r), None),
-            Err(e) => (None, Some(format!("{e:#}"))),
-        };
-        let root = repo
-            .as_ref()
-            .map(|r| r.root().to_path_buf())
-            .unwrap_or(root);
+    /// `start` is the folder to open, and whether the user named it (a failure is
+    /// then reported). Without a repository the welcome screen shows.
+    pub fn new(
+        start: Option<(PathBuf, bool)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let message = cx.new(|cx| TextInput::new("Message", cx));
         let mut subscriptions =
             vec![
@@ -298,9 +301,10 @@ impl Workspace {
         });
 
         let mut this = Self {
-            repo,
-            root,
-            open_error,
+            repo: None,
+            root: PathBuf::new(),
+            welcome_error: None,
+            recent: Vec::new(),
             head: HeadInfo::default(),
             staged: vec![],
             unstaged: vec![],
@@ -328,12 +332,63 @@ impl Workspace {
             _tasks: vec![poll],
             _subscriptions: subscriptions,
         };
-        this.refresh(cx);
-        // Show the first changed file straight away.
-        if let Some(first) = this.unstaged.first().or(this.staged.first()).cloned() {
-            this.open(first.staged, first.path, false, cx);
-        }
+        let repo = start.and_then(|(path, named)| match Repo::discover(&path) {
+            Ok(repo) => Some(repo),
+            Err(_) => {
+                if named {
+                    this.welcome_error =
+                        Some(format!("No git repository found at {}.", path.display()));
+                }
+                None
+            }
+        });
+        this.switch_repo(repo, window, cx);
         this
+    }
+
+    /// Replaces the open repository (or closes it with `None`, which shows the
+    /// welcome screen), resetting everything that belonged to the old one.
+    pub(super) fn switch_repo(
+        &mut self,
+        repo: Option<Repo>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.tabs.clear();
+        self.active = None;
+        self.staged.clear();
+        self.unstaged.clear();
+        self.head = HeadInfo::default();
+        self.menu = None;
+        self.error = None;
+        self.status_note = None;
+        self.picker = None;
+        self.on_pick = None;
+        self._picker_subscription = None;
+        self.picker_is_files = false;
+        self.scroll_axis = None;
+        self.lock_y = 0.;
+        self.message.update(cx, |m, cx| m.set_text("", cx));
+        match repo {
+            Some(repo) => {
+                self.welcome_error = None;
+                self.root = repo.root().to_path_buf();
+                self.repo = Some(repo);
+                self.recent = crate::recent::add(&self.root);
+                self.refresh(cx);
+                // Show the first changed file straight away.
+                if let Some(first) = self.unstaged.first().or(self.staged.first()).cloned() {
+                    self.open(first.staged, first.path, false, cx);
+                }
+                window.focus(&self.message.focus_handle(cx));
+            }
+            None => {
+                self.repo = None;
+                self.recent = crate::recent::load();
+                window.focus(&self.focus_handle);
+            }
+        }
+        cx.notify();
     }
 
     pub fn title(&self) -> String {
@@ -1603,24 +1658,8 @@ impl Render for Workspace {
         let state = cx.global::<ThemeState>();
         let (ui_font, t) = (state.ui_font.clone(), state.theme.clone());
 
-        let body: gpui::AnyElement = if let Some(err) = &self.open_error {
-            div()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap_2()
-                .text_color(t.muted)
-                .child(
-                    div()
-                        .text_size(px(15.))
-                        .text_color(t.fg)
-                        .child("No git repository here"),
-                )
-                .child(err.clone())
-                .child("Start drift from inside a repository, or pass its path: drift <path>")
-                .into_any_element()
+        let body: gpui::AnyElement = if self.repo.is_none() {
+            self.render_welcome(cx)
         } else {
             div()
                 .flex_1()
@@ -1683,6 +1722,11 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &Pull, _, cx| this.remote(RemoteOp::Pull, cx)))
             .on_action(cx.listener(|this, _: &Push, _, cx| this.remote(RemoteOp::Push, cx)))
             .on_action(cx.listener(|this, _: &Sync, _, cx| this.remote(RemoteOp::Sync, cx)))
+            .on_action(
+                cx.listener(|this, _: &OpenRepository, window, cx| {
+                    this.open_repo_dialog(window, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &Quit, window, cx| {
                 this.confirm_unsaved(window, cx, |_, _, cx| cx.quit())
             }))
@@ -1733,11 +1777,5 @@ impl Render for Workspace {
                             .child(picker.clone()),
                     )
             }))
-    }
-}
-
-impl Workspace {
-    pub fn message_focus(&self, cx: &gpui::App) -> FocusHandle {
-        self.message.focus_handle(cx)
     }
 }

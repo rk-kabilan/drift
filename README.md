@@ -23,6 +23,8 @@ cargo run --release              # opens the repository containing the current f
 cargo run --release -- ~/code/x  # or a given path
 ```
 
+Started anywhere else (or from the Dock, Start menu or app launcher), drift shows a welcome screen: open a repository folder, clone one, create a new one, or pick one of the last ten you opened. The recent list is kept in `~/Library/Application Support/drift/` on macOS, `%APPDATA%\drift\` on Windows and `~/.local/state/drift/` on Linux.
+
 **Linux** also needs the usual GPUI system libraries, for example on Debian/Ubuntu:
 
 ```sh
@@ -32,6 +34,23 @@ sudo apt install libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-
 
 **macOS** needs Xcode command line tools; **Windows** needs the MSVC build tools.
 
+## App icon and packaging
+
+The icon lives in `assets/app-icon/` (`drift.svg` is the master; `drift-macos.svg` is the macOS version on Apple's icon grid).
+
+- **Windows:** `build.rs` embeds `windows/drift.ico` (16 to 256 px) into `drift.exe`, so Explorer, the taskbar and Alt+Tab show it with a plain `cargo build`.
+- **macOS:** a bare binary has no Dock icon. Build an app bundle that uses `macos/drift.icns`:
+  ```sh
+  cargo install cargo-bundle
+  cargo bundle --release            # target/release/bundle/osx/drift.app
+  ```
+- **Linux:** desktops find the icon through `drift.desktop`. The window's app id (and X11 `WM_CLASS`) is `drift`, which matches that file. Use `cargo bundle --release --format deb` for a `.deb`, or install by hand:
+  ```sh
+  install -Dm755 target/release/drift ~/.local/bin/drift
+  cp -r assets/app-icon/linux/hicolor ~/.local/share/icons/
+  install -Dm644 assets/app-icon/linux/drift.desktop ~/.local/share/applications/drift.desktop
+  ```
+
 ## Keyboard
 
 | Keys | Action |
@@ -40,6 +59,7 @@ sudo apt install libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-
 | `Enter`, `Shift+Enter` | New line in the message |
 | `F7` / `Shift+F7` | Next / previous change |
 | `F5`, `Ctrl+R` / `Cmd+R` | Refresh |
+| `Ctrl+O` / `Cmd+O` | Open a repository |
 | `Ctrl+Q` / `Cmd+Q` | Quit |
 
 ## Layout of the code
@@ -52,6 +72,7 @@ sudo apt install libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-
 | `src/theme.rs` | Light and dark palettes |
 | `src/ui/` | GPUI views: workspace, changes pane, diff pane, status bar, commit message input, dialog |
 | `assets/icons/` | SVG icons, compiled into the binary |
+| `assets/app-icon/` | App icon for macOS (`.icns`), Windows (`.ico`, embedded by `build.rs`) and Linux (hicolor PNGs, SVG, `.desktop`) |
 | `patches/xattr` | Local copy of `xattr` 0.2.3 (pulled in by GPUI) fixed for current `libc` on Linux |
 
 Run the tests with `cargo test`.

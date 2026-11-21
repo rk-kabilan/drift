@@ -5,6 +5,7 @@ pub mod prompt;
 mod sidebar;
 mod status_bar;
 pub mod text_input;
+mod welcome;
 mod widgets;
 mod workspace;
 

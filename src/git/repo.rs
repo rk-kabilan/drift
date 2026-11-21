@@ -117,7 +117,9 @@ impl Repo {
         let root = repo
             .workdir()
             .ok_or_else(|| anyhow!("bare repositories are not supported"))?
-            .to_path_buf();
+            // Rebuilt from components to drop git's trailing slash.
+            .components()
+            .collect();
         Ok(Self { repo, root })
     }
 

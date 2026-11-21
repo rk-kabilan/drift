@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "A fast, git-only desktop client built with Rust and GPUI"
 license = "MIT"
+build = "build.rs"
 
 [dependencies]
 gpui = "0.2.2"
@@ -13,6 +14,10 @@ anyhow = "1"
 env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
 log = "0.4"
 unicode-segmentation = "1"
+
+# Embeds the Windows app icon (assets/app-icon/windows/drift.rc) into drift.exe.
+[build-dependencies]
+embed-resource = "3"
 
 # On macOS, compile GPUI's Metal shaders when the app starts instead of at build
 # time, so building needs only the Xcode command line tools, not full Xcode.
@@ -29,3 +34,21 @@ lto = "thin"
 codegen-units = 1
 strip = true
 panic = "abort"
+
+# App bundles made with `cargo bundle --release` (https://github.com/burtonageo/cargo-bundle):
+# a macOS .app that uses drift.icns, or a Linux .deb that installs the hicolor PNGs.
+[package.metadata.bundle]
+name = "drift"
+identifier = "io.github.rk-kabilan.drift"
+icon = [
+    "assets/app-icon/macos/drift.icns",
+    "assets/app-icon/linux/hicolor/16x16/apps/drift.png",
+    "assets/app-icon/linux/hicolor/32x32/apps/drift.png",
+    "assets/app-icon/linux/hicolor/48x48/apps/drift.png",
+    "assets/app-icon/linux/hicolor/64x64/apps/drift.png",
+    "assets/app-icon/linux/hicolor/128x128/apps/drift.png",
+    "assets/app-icon/linux/hicolor/256x256/apps/drift.png",
+    "assets/app-icon/linux/hicolor/512x512/apps/drift.png",
+]
+category = "Developer Tool"
+short_description = "A fast, git-only desktop client"
