@@ -1,8 +1,8 @@
-# drift
+# Drift
 
 A fast, git-only desktop client written in Rust with [GPUI](https://gpui.rs), the GPU-accelerated UI framework behind Zed. It runs on macOS, Windows and Linux.
 
-drift does one thing: review and commit changes. There is no editor, file search or extension system.
+Drift does one thing: review and commit changes. There is no editor, file search or extension system.
 
 ## What it does
 
@@ -12,7 +12,7 @@ drift does one thing: review and commit changes. There is no editor, file search
 - **Title bar.** Repository and branch only.
 - **Light and dark themes.** Follows the OS; the sun/moon button in the status bar switches manually, and `DRIFT_THEME=light|dark` pins one.
 
-Reads (status, file contents, blame, ahead/behind) use libgit2. Writes (stage, unstage, discard, commit, push, pull) run the `git` command, so your hooks, signing and credential helpers apply exactly as in a terminal. drift refreshes when its window gains focus and every few seconds while it is in front.
+Reads (status, file contents, blame, ahead/behind) use libgit2. Writes (stage, unstage, discard, commit, push, pull) run the `git` command, so your hooks, signing and credential helpers apply exactly as in a terminal. Drift refreshes when its window gains focus and every few seconds while it is in front.
 
 ## Build and run
 
@@ -23,7 +23,7 @@ cargo run --release              # opens the repository containing the current f
 cargo run --release -- ~/code/x  # or a given path
 ```
 
-Started anywhere else (or from the Dock, Start menu or app launcher), drift shows a welcome screen: open a repository folder, clone one, create a new one, or pick one of the last ten you opened. Each repository opens in its own window; the welcome window becomes the first one you open from it. The recent list is kept in `~/Library/Application Support/drift/` on macOS, `%APPDATA%\drift\` on Windows and `~/.local/state/drift/` on Linux.
+Started anywhere else (or from the Dock, Start menu or app launcher), Drift shows a welcome screen: open a repository folder, clone one, create a new one, or pick one of the last ten you opened. Each repository opens in its own window; the welcome window becomes the first one you open from it. The recent list is kept in `~/Library/Application Support/drift/` on macOS, `%APPDATA%\drift\` on Windows and `~/.local/state/drift/` on Linux.
 
 **Linux** also needs the usual GPUI system libraries, for example on Debian/Ubuntu:
 
@@ -39,11 +39,7 @@ sudo apt install libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-
 The icon lives in `assets/app-icon/` (`drift.svg` is the master; `drift-macos.svg` is the macOS version on Apple's icon grid).
 
 - **Windows:** `build.rs` embeds `windows/drift.ico` (16 to 256 px) into `drift.exe`, so Explorer, the taskbar and Alt+Tab show it with a plain `cargo build`.
-- **macOS:** a bare binary has no Dock icon. Build an app bundle that uses `macos/drift.icns`:
-  ```sh
-  cargo install cargo-bundle
-  cargo bundle --release            # target/release/bundle/osx/drift.app
-  ```
+- **macOS:** a bare binary has no Dock icon. `scripts/package-macos.sh` builds `Drift.app` (with `macos/drift.icns`) and a drag-to-Applications `.dmg` in `target/release/macos/`, using only `codesign` and `hdiutil` from macOS. The app is signed ad hoc, so it runs on your own Mac; to share it, sign it with a Developer ID and notarize it. Pass `--no-dmg` for the app alone.
 - **Linux:** desktops find the icon through `drift.desktop`. The window's app id (and X11 `WM_CLASS`) is `drift`, which matches that file. Use `cargo bundle --release --format deb` for a `.deb`, or install by hand:
   ```sh
   install -Dm755 target/release/drift ~/.local/bin/drift

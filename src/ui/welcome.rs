@@ -17,7 +17,7 @@ use crate::git::Repo;
 use crate::recent;
 use crate::theme::ActiveTheme as _;
 
-/// The drift mark (a PNG at 3x the 56 px it shows at), shared by every render.
+/// The Drift mark (a PNG at 3x the 56 px it shows at), shared by every render.
 fn logo() -> Arc<Image> {
     static LOGO: OnceLock<Arc<Image>> = OnceLock::new();
     LOGO.get_or_init(|| {
@@ -420,7 +420,7 @@ impl Workspace {
                                 div()
                                     .text_size(px(26.))
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child("drift"),
+                                    .child("Drift"),
                             )
                             .child(
                                 div()

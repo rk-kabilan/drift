@@ -1,4 +1,4 @@
-//! drift: a fast, git-only desktop client.
+//! Drift: a fast, git-only desktop client.
 
 mod assets;
 mod diff;

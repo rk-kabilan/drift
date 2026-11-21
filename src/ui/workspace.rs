@@ -44,7 +44,7 @@ actions!(
     ]
 );
 
-/// Opens a drift window. `start` is as for [`Workspace::new`]; `cascade` is the
+/// Opens a Drift window. `start` is as for [`Workspace::new`]; `cascade` is the
 /// window to offset the new one from, so the two don't sit exactly on top of
 /// each other.
 pub fn open_window(
@@ -60,7 +60,7 @@ pub fn open_window(
         gpui::WindowOptions {
             window_bounds: Some(gpui::WindowBounds::Windowed(bounds)),
             titlebar: Some(gpui::TitlebarOptions {
-                title: Some("drift".into()),
+                title: Some("Drift".into()),
                 appears_transparent: cfg!(target_os = "macos"),
                 traffic_light_position: Some(gpui::point(px(12.), px(11.))),
             }),
@@ -496,7 +496,7 @@ impl Workspace {
 
     pub fn title(&self) -> String {
         if self.repo.is_none() {
-            return "drift".into();
+            return "Drift".into();
         }
         format!("{} · {}", self.head.repo_name, self.head.branch)
     }

@@ -38,7 +38,7 @@ panic = "abort"
 # App bundles made with `cargo bundle --release` (https://github.com/burtonageo/cargo-bundle):
 # a macOS .app that uses drift.icns, or a Linux .deb that installs the hicolor PNGs.
 [package.metadata.bundle]
-name = "drift"
+name = "Drift"
 identifier = "io.github.rk-kabilan.drift"
 icon = [
     "assets/app-icon/macos/drift.icns",

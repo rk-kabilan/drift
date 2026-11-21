@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=drift
+Name=Drift
 GenericName=Git Client
 Comment=A fast, git-only desktop client
 Exec=drift %F
