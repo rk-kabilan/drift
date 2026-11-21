@@ -480,7 +480,7 @@ impl Workspace {
                             .child(
                                 div()
                                     .text_color(t.muted)
-                                    .child("A fast, Git desktop client"),
+                                    .child("A fast Git desktop client"),
                             ),
                     ),
             )

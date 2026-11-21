@@ -86,7 +86,7 @@ Depends: git, libc6, zlib1g, libxkbcommon0, libxkbcommon-x11-0, libwayland-clien
 Installed-Size: $(du -sk "$DEB/usr" | cut -f1)
 Maintainer: $MAINTAINER
 Homepage: https://github.com/rk-kabilan/drift
-Description: Fast, Git desktop client
+Description: Fast Git desktop client
  Drift reviews and commits changes: a changes pane, side by side and inline
  diffs, blame, branches, stashes and remotes, with nothing else in the way.
 CONTROL
@@ -109,7 +109,7 @@ if command -v rpmbuild >/dev/null 2>&1; then
 Name: drift
 Version: $VERSION
 Release: 1
-Summary: Fast, Git desktop client
+Summary: Fast Git desktop client
 License: MIT
 URL: https://github.com/rk-kabilan/drift
 Requires: git

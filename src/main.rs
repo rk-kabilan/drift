@@ -1,4 +1,4 @@
-//! Drift: a fast, Git desktop client.
+//! Drift: a fast Git desktop client.
 
 // Release builds on Windows are GUI apps: no console window opens next to Drift.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]

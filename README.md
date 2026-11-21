@@ -34,6 +34,17 @@ sudo apt install libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libvulkan-
 
 **macOS** needs Xcode command line tools; **Windows** needs the MSVC build tools.
 
+Run the tests with `cargo test`.
+
+## Installing on macOS
+
+The macOS download isn't signed with an Apple Developer ID or notarized yet, so the first time you open it macOS says "Drift Not Opened: Apple could not verify Drift is free of malware". To open it anyway, after dragging Drift to Applications, either:
+
+- run `xattr -dr com.apple.quarantine /Applications/Drift.app` in Terminal, then open Drift as usual, or
+- try to open Drift once, then go to **System Settings → Privacy & Security** and click **Open Anyway** next to the Drift message.
+
+You only need to do this once per version. The permanent fix is an Apple Developer account ($99 a year): with a Developer ID certificate, the release workflow can sign and notarize the app so it opens without the warning.
+
 ## Packaging
 
 One command per platform builds a release and packages it into `target/release/<platform>/`. Each package has to be built on its own OS.
@@ -54,22 +65,14 @@ The macOS app is signed ad hoc, which runs on your own Mac. To share builds with
 
 ### Releasing
 
-`.github/workflows/release.yml` builds every package on GitHub's macOS, Windows and Linux machines and publishes them as a GitHub Release. To release, set `version` in `Cargo.toml`, commit, and push a matching tag:
+`.github/workflows/release.yaml` builds every package on GitHub's macOS, Windows and Linux machines and publishes them as a GitHub Release. To release, set `version` in `Cargo.toml`, commit, and push a matching tag:
 
 ```sh
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The workflow stops if the tag and `Cargo.toml` disagree. Running it by hand from the Actions tab builds the packages as downloadable artifacts without publishing anything.
-
-### Updates
-
-Once a day Drift checks the repository's latest GitHub Release (with the system's `curl`, so the app carries no HTTP code). When a newer version exists, the status bar and the welcome screen show "Drift x.y.z available", linking to the download page. The update icon in the status bar, "Check Now" in Settings and "Settings: Check for Updates…" in the command palette check right away. Installing the new package replaces the old version; settings and recent repositories are kept. The daily check can be turned off in Settings; `DRIFT_UPDATE_CHECK=0` or `1` overrides that, and debug builds don't check unless it is `1`. Release downloads must be public for this to work.
-
-### App icon
-
-The icon lives in `assets/app-icon/` (`drift.svg` is the master; `drift-macos.svg` is the macOS version on Apple's icon grid). `build.rs` embeds `windows/drift.ico` and the "Drift" product name into `drift.exe`; the macOS script puts `macos/drift.icns` in the app; the Linux packages install the hicolor icons and `drift.desktop`, whose name matches the window's app id (`drift`).
+The tests run first, and the packages build only if they pass. The workflow stops if the tag and `Cargo.toml` disagree. Running it by hand from the Actions tab also publishes the `Cargo.toml` version (tagging that commit); untick **Publish** to only build the packages as downloadable artifacts.
 
 ## Settings
 
@@ -104,24 +107,3 @@ Defaults (change them in Settings → Keyboard Shortcuts):
 | `Ctrl+P` / `Cmd+P` | Go to file |
 | `Ctrl+,` / `Cmd+,` | Settings |
 | `Ctrl+Q` / `Cmd+Q` | Quit |
-
-## Layout of the code
-
-| Path | Contents |
-| --- | --- |
-| `src/git/` | Repository access: status, contents, blame, ahead/behind, and git command writes |
-| `src/diff.rs` | Line diff model: hunks, folds, side-by-side and inline rows, word-level changes |
-| `src/syntax.rs` | Small language-agnostic highlighter |
-| `src/theme.rs` | Light and dark palettes |
-| `src/ui/` | GPUI views: workspace, changes pane, diff pane, status bar, commit message input, dialog |
-| `assets/icons/` | SVG icons, compiled into the binary |
-| `assets/app-icon/` | App icon for macOS (`.icns`), Windows (`.ico`, embedded by `build.rs`) and Linux (hicolor PNGs, SVG, `.desktop`) |
-| `scripts/` | Packaging scripts for macOS, Linux and Windows |
-| `src/update.rs` | Daily check for a newer release |
-| `src/settings.rs` | Settings file: theme, update check, shortcut overrides |
-| `src/ui/shortcuts.rs` | Shortcut table, defaults and rebinding |
-| `src/ui/settings_panel.rs` | The Settings panel |
-| `.github/workflows/release.yml` | Builds and publishes a release when a `v*` tag is pushed |
-| `patches/xattr` | Local copy of `xattr` 0.2.3 (pulled in by GPUI) fixed for current `libc` on Linux |
-
-Run the tests with `cargo test`.

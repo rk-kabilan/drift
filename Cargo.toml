@@ -2,7 +2,7 @@
 name = "drift"
 version = "0.1.0"
 edition = "2021"
-description = "A fast, Git desktop client built with Rust and GPUI"
+description = "A fast Git desktop client built with Rust and GPUI"
 license = "MIT"
 build = "build.rs"
 
