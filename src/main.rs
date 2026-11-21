@@ -21,6 +21,7 @@ use crate::ui::Workspace;
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    git::limit_memory();
     let root = std::env::args_os()
         .nth(1)
         .map(PathBuf::from)

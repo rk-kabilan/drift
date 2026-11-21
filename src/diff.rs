@@ -3,6 +3,7 @@
 
 use std::collections::HashSet;
 use std::ops::Range;
+use std::sync::Arc;
 
 use similar::{ChangeTag, DiffOp, TextDiff};
 
@@ -21,7 +22,9 @@ pub enum LineKind {
 pub struct Side {
     /// 1-based line number in its file.
     pub line: usize,
-    pub text: String,
+    /// Shared with the diff model and every row showing this line, so
+    /// building rows and rendering never copy line text.
+    pub text: Arc<str>,
     pub kind: LineKind,
     /// Byte ranges of `text` that changed relative to the paired line.
     pub changes: Vec<Range<usize>>,
@@ -80,18 +83,26 @@ pub struct ChangeBlock {
 
 /// A computed diff between two texts.
 pub struct FileDiff {
-    old_lines: Vec<String>,
+    old_lines: Vec<Arc<str>>,
     blocks: Vec<Block>,
     pub added: usize,
     pub removed: usize,
+    /// Characters in the longest line on either side, for horizontal scrolling.
+    pub max_cols: usize,
 }
 
 impl FileDiff {
     pub fn new(old: &str, new: &str) -> Self {
-        let old_lines: Vec<String> = split_lines(old);
-        let new_lines: Vec<String> = split_lines(new);
-        let old_refs: Vec<&str> = old_lines.iter().map(String::as_str).collect();
-        let new_refs: Vec<&str> = new_lines.iter().map(String::as_str).collect();
+        let old_lines: Vec<Arc<str>> = split_lines(old);
+        let new_lines: Vec<Arc<str>> = split_lines(new);
+        let max_cols = old_lines
+            .iter()
+            .chain(&new_lines)
+            .map(|l| l.chars().count())
+            .max()
+            .unwrap_or(0);
+        let old_refs: Vec<&str> = old_lines.iter().map(|l| &**l).collect();
+        let new_refs: Vec<&str> = new_lines.iter().map(|l| &**l).collect();
         let diff = TextDiff::configure()
             .algorithm(similar::Algorithm::Patience)
             .diff_slices(&old_refs, &new_refs);
@@ -164,6 +175,7 @@ impl FileDiff {
             blocks,
             added,
             removed,
+            max_cols,
         }
     }
 
@@ -303,14 +315,14 @@ impl FileDiff {
     }
 }
 
-fn split_lines(text: &str) -> Vec<String> {
-    text.lines().map(expand_tabs).collect()
+fn split_lines(text: &str) -> Vec<Arc<str>> {
+    text.lines().map(|l| Arc::from(&*expand_tabs(l))).collect()
 }
 
-fn expand_tabs(line: &str) -> String {
+fn expand_tabs(line: &str) -> std::borrow::Cow<'_, str> {
     let line = line.strip_suffix('\r').unwrap_or(line);
     if !line.contains('\t') {
-        return line.to_string();
+        return line.into();
     }
     let mut out = String::with_capacity(line.len() + 8);
     let mut col = 0;
@@ -324,10 +336,10 @@ fn expand_tabs(line: &str) -> String {
             col += 1;
         }
     }
-    out
+    out.into()
 }
 
-fn side_lines(lines: &[String], start: usize, len: usize, kind: LineKind) -> Vec<Side> {
+fn side_lines(lines: &[Arc<str>], start: usize, len: usize, kind: LineKind) -> Vec<Side> {
     (start..start + len)
         .map(|i| Side {
             line: i + 1,

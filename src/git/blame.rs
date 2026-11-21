@@ -26,15 +26,23 @@ impl BlameInfo {
 
 /// Blame for every line of a file's working-tree contents. Lines that are not
 /// committed yet have no entry.
+///
+/// Each commit is stored once; lines hold a 4-byte index into `commits`, so a
+/// large file costs little more than one integer per line.
 #[derive(Clone, Debug, Default)]
 pub struct Blame {
-    lines: Vec<Option<BlameInfo>>,
+    commits: Vec<BlameInfo>,
+    lines: Vec<u32>,
 }
+
+/// Marks a line with no commit (not committed yet).
+const NONE: u32 = u32::MAX;
 
 impl Blame {
     /// Blame for a 1-based line number.
     pub fn line(&self, line: usize) -> Option<&BlameInfo> {
-        self.lines.get(line.checked_sub(1)?)?.as_ref()
+        let ix = *self.lines.get(line.checked_sub(1)?)?;
+        self.commits.get(ix as usize)
     }
 }
 
@@ -43,10 +51,19 @@ pub(super) fn blame(repo: &Repository, path: &str, contents: &str) -> Result<Bla
     let committed = repo.blame_file(Path::new(path), Some(&mut opts))?;
     let blame = committed.blame_buffer(contents.as_bytes())?;
     let line_count = contents.lines().count();
-    let mut lines = vec![None; line_count];
+    let mut lines = vec![NONE; line_count];
+    let mut commits: Vec<BlameInfo> = Vec::new();
+    let mut index: std::collections::HashMap<git2::Oid, u32> = Default::default();
     for hunk in blame.iter() {
         let oid = hunk.final_commit_id();
         if oid.is_zero() {
+            continue;
+        }
+        let start = hunk.final_start_line().saturating_sub(1);
+        if let Some(&ix) = index.get(&oid) {
+            for slot in lines.iter_mut().skip(start).take(hunk.lines_in_hunk()) {
+                *slot = ix;
+            }
             continue;
         }
         let Ok(commit) = repo.find_commit(oid) else {
@@ -61,12 +78,15 @@ pub(super) fn blame(repo: &Repository, path: &str, contents: &str) -> Result<Bla
             summary: commit.summary().unwrap_or("").to_string(),
             short_sha: super::repo::short(&oid),
         };
-        let start = hunk.final_start_line().saturating_sub(1);
+        let ix = commits.len() as u32;
+        commits.push(info);
+        index.insert(oid, ix);
         for slot in lines.iter_mut().skip(start).take(hunk.lines_in_hunk()) {
-            *slot = Some(info.clone());
+            *slot = ix;
         }
     }
-    Ok(Blame { lines })
+    commits.shrink_to_fit();
+    Ok(Blame { commits, lines })
 }
 
 /// "3 days ago" for a Unix timestamp.

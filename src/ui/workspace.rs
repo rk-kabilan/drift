@@ -37,6 +37,7 @@ actions!(
         Pull,
         Push,
         Sync,
+        Save,
         Quit
     ]
 );
@@ -56,6 +57,7 @@ pub fn actions_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("ctrl-tab", NextTab, None),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
         KeyBinding::new("secondary-q", Quit, None),
+        KeyBinding::new("secondary-s", Save, None),
     ]
 }
 
@@ -134,8 +136,13 @@ pub struct RefFilter {
 
 pub struct DiffState {
     pub change: FileChange,
-    pub old_text: String,
-    pub new_text: String,
+    /// Hash of both texts, to tell whether the file changed since the diff was
+    /// drawn without keeping two full copies of it around.
+    fingerprint: u64,
+    /// Either side is a binary file (shown as a placeholder, not mergeable).
+    pub binary: bool,
+    /// Both sides are empty.
+    pub empty: bool,
     pub file: FileDiff,
     pub rows: Vec<Row>,
     pub expanded: HashSet<usize>,
@@ -152,8 +159,40 @@ pub struct Tab {
     pub staged: bool,
     pub path: String,
     pub pinned: bool,
+    /// Only the active tab keeps its diff in memory; others are rebuilt when shown.
     pub diff: Option<DiffState>,
+    /// Folds and cursor of an unloaded tab, restored when it is shown again.
+    saved_view: Option<(HashSet<usize>, Option<CursorLine>)>,
     pub scroll: UniformListScrollHandle,
+    /// Horizontal scroll of the code, in pixels (shared by both sides).
+    pub h_scroll: f32,
+    /// Unsaved edits made with the merge arrows. Nothing is written to the
+    /// working tree or the index until the tab is saved.
+    pub draft: Option<Draft>,
+}
+
+/// Edited text for either side of a diff, waiting to be saved.
+#[derive(Clone, Debug)]
+pub struct Draft {
+    /// New text for the left side (the index, for an unstaged file).
+    pub left: Option<String>,
+    /// New text for the right side (the working tree, or the index for a staged file).
+    pub right: Option<String>,
+    /// Fingerprint of the files on disk when editing began, to catch outside changes.
+    base: u64,
+}
+
+const BINARY: &str = "(binary file)";
+
+pub(super) const UNSAVED_BEFORE_COMMIT: &str =
+    "Some diffs have unsaved edits. Save (Cmd/Ctrl+S) or discard them before committing.";
+
+fn fingerprint(old: &str, new: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    old.hash(&mut h);
+    new.hash(&mut h);
+    h.finish()
 }
 
 pub struct Workspace {
@@ -181,6 +220,15 @@ pub struct Workspace {
     picker_is_files: bool,
     pub(super) recent_commands: Vec<super::commands::Cmd>,
     pub(super) show_blame: bool,
+    /// Width of the diff list, measured at paint, for clamping horizontal scroll.
+    pub(super) diff_width: std::rc::Rc<std::cell::Cell<f32>>,
+    /// Advance of one character of the code font.
+    pub(super) char_width: Option<f32>,
+    /// The axis the current scroll gesture is locked to (true = sideways), and
+    /// when its last event arrived.
+    pub(super) scroll_axis: Option<(bool, std::time::Instant)>,
+    /// Vertical offset held while a sideways gesture runs.
+    pub(super) lock_y: f32,
     focus_handle: FocusHandle,
     _picker_subscription: Option<gpui::Subscription>,
     _tasks: Vec<gpui::Task<()>>,
@@ -221,6 +269,19 @@ impl Workspace {
             }
         }));
 
+        // Closing the window with unsaved edits asks first.
+        let weak = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            weak.update(cx, |this, cx| {
+                if !this.has_unsaved() {
+                    return true;
+                }
+                this.confirm_unsaved(window, cx, |_, window, _| window.remove_window());
+                false
+            })
+            .unwrap_or(true)
+        });
+
         // Poll for outside changes (editors, terminals) while the window is in front.
         let poll = cx.spawn_in(window, async move |this, cx| loop {
             cx.background_executor().timer(Duration::from_secs(3)).await;
@@ -258,6 +319,10 @@ impl Workspace {
             picker_is_files: false,
             recent_commands: Vec::new(),
             show_blame: true,
+            diff_width: Default::default(),
+            char_width: None,
+            scroll_axis: None,
+            lock_y: 0.,
             focus_handle: cx.focus_handle(),
             _picker_subscription: None,
             _tasks: vec![poll],
@@ -314,7 +379,8 @@ impl Workspace {
         let mut kept: Vec<Tab> = Vec::with_capacity(self.tabs.len());
         for mut tab in std::mem::take(&mut self.tabs) {
             let in_list = |staged: bool| self.list(staged).iter().any(|c| c.path == tab.path);
-            if !in_list(tab.staged) {
+            // A tab with unsaved edits stays put, so they are never lost silently.
+            if !in_list(tab.staged) && tab.draft.is_none() {
                 if in_list(!tab.staged) {
                     tab.staged = !tab.staged;
                     tab.diff = None;
@@ -343,9 +409,7 @@ impl Workspace {
                 })
                 .or(Some(self.active.unwrap_or(0).min(self.tabs.len() - 1)))
         };
-        for i in 0..self.tabs.len() {
-            self.load_tab(i, false);
-        }
+        self.load_active_tab();
 
         let message_placeholder = format!(
             "Message ({}+Enter to commit on '{}')",
@@ -376,15 +440,23 @@ impl Workspace {
                 self.tabs[ix].pinned = true;
             }
             self.active = Some(ix);
+            self.load_active_tab();
         } else {
             let tab = Tab {
                 staged,
                 path,
                 pinned: pin,
                 diff: None,
+                saved_view: None,
                 scroll: UniformListScrollHandle::new(),
+                h_scroll: 0.,
+                draft: None,
             };
-            match self.tabs.iter().position(|t| !t.pinned) {
+            match self
+                .tabs
+                .iter()
+                .position(|t| !t.pinned && t.draft.is_none())
+            {
                 Some(preview) if !pin => {
                     self.tabs[preview] = tab;
                     self.active = Some(preview);
@@ -396,6 +468,7 @@ impl Workspace {
                 }
             }
             self.load_tab(self.active.unwrap(), true);
+            self.unload_inactive_tabs();
         }
         cx.notify();
     }
@@ -403,6 +476,7 @@ impl Workspace {
     pub fn activate_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
         if ix < self.tabs.len() {
             self.active = Some(ix);
+            self.load_active_tab();
             cx.notify();
         }
     }
@@ -425,6 +499,7 @@ impl Workspace {
             Some(a) => Some(a.min(self.tabs.len() - 1)),
             None => None,
         };
+        self.load_active_tab();
         cx.notify();
     }
 
@@ -432,7 +507,27 @@ impl Workspace {
         if let Some(a) = self.active {
             let n = self.tabs.len() as isize;
             self.active = Some(((a as isize + delta).rem_euclid(n)) as usize);
+            self.load_active_tab();
             cx.notify();
+        }
+    }
+
+    /// Loads (or refreshes) the active tab's diff and frees every other tab's,
+    /// so memory stays at one diff however many tabs are open.
+    fn load_active_tab(&mut self) {
+        self.unload_inactive_tabs();
+        if let Some(a) = self.active.filter(|&a| a < self.tabs.len()) {
+            self.load_tab(a, false);
+        }
+    }
+
+    fn unload_inactive_tabs(&mut self) {
+        for (i, tab) in self.tabs.iter_mut().enumerate() {
+            if Some(i) != self.active {
+                if let Some(d) = tab.diff.take() {
+                    tab.saved_view = Some((d.expanded, d.cursor));
+                }
+            }
         }
     }
 
@@ -443,12 +538,29 @@ impl Workspace {
         let Some(change) = self.list(staged).iter().find(|c| c.path == path).cloned() else {
             return;
         };
-        let (old, new, left_label, right_label) = repo.change_texts(&change);
+        let (old, new, mut left_label, mut right_label) = repo.change_texts(&change);
         let tab = &mut self.tabs[ix];
+        // Unsaved edits replace what is on disk in the view.
+        let (old, new) = match &tab.draft {
+            Some(draft) => {
+                if draft.left.is_some() {
+                    left_label.push_str(" · unsaved");
+                }
+                if draft.right.is_some() {
+                    right_label.push_str(" · unsaved");
+                }
+                (
+                    draft.left.clone().unwrap_or(old),
+                    draft.right.clone().unwrap_or(new),
+                )
+            }
+            None => (old, new),
+        };
 
+        let print = fingerprint(&old, &new);
         if !reset_view {
             if let Some(d) = &mut tab.diff {
-                if d.old_text == old && d.new_text == new && d.change == change {
+                if d.fingerprint == print && d.change == change {
                     d.left_label = left_label;
                     d.right_label = right_label;
                     return;
@@ -456,9 +568,12 @@ impl Workspace {
             }
         }
         let file = FileDiff::new(&old, &new);
-        let (expanded, cursor) = match (&tab.diff, reset_view) {
-            (Some(d), false) => (d.expanded.clone(), d.cursor),
-            _ => (HashSet::new(), None),
+        let saved = tab.saved_view.take();
+        let (expanded, cursor) = match (tab.diff.take(), saved, reset_view) {
+            (_, _, true) => (HashSet::new(), None),
+            (Some(d), _, false) => (d.expanded, d.cursor),
+            (None, Some(view), false) => view,
+            (None, None, false) => (HashSet::new(), None),
         };
         let rows = file.rows(self.layout, &expanded);
         let blame = if change.kind == ChangeKind::Untracked || new.is_empty() {
@@ -474,11 +589,13 @@ impl Workspace {
         };
         if reset_view {
             tab.scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
+            tab.h_scroll = 0.;
         }
         tab.diff = Some(DiffState {
             change,
-            old_text: old,
-            new_text: new,
+            fingerprint: print,
+            binary: old == BINARY || new == BINARY,
+            empty: old.is_empty() && new.is_empty(),
             file,
             rows,
             expanded,
@@ -560,7 +677,7 @@ impl Workspace {
     /// is HEAD and right the index, and HEAD cannot be written.
     pub fn merge_directions(&self) -> (bool, bool) {
         match self.diff() {
-            Some(d) if d.old_text != "(binary file)" && d.new_text != "(binary file)" => {
+            Some(d) if !d.binary => {
                 let to_right = true;
                 let to_left = !d.change.staged;
                 (to_right, to_left)
@@ -569,47 +686,254 @@ impl Workspace {
         }
     }
 
-    /// Copies one change block across the diff: towards the working tree
-    /// (revert), into the index (stage just this block), or from HEAD into the
-    /// index (unstage just this block).
+    /// Copies one change block across the diff into the tab's unsaved draft:
+    /// towards the working tree (revert), into the index (stage just this
+    /// block), or from HEAD into the index (unstage just this block). Nothing
+    /// is written until the tab is saved.
     pub fn merge_block(&mut self, block: usize, direction: MergeDirection, cx: &mut Context<Self>) {
+        let Some(ix) = self.active else { return };
         let Some(d) = self.diff() else { return };
         let Some(range) = d.file.blocks().get(block).cloned() else {
             return;
         };
-        let (staged, path) = (d.change.staged, d.change.path.clone());
-        let (old, new) = (d.old_text.clone(), d.new_text.clone());
-        let Some(repo) = &self.repo else { return };
-
-        // Refuse if the file changed since the diff was drawn.
-        let (cur_old, cur_new, _, _) = repo.change_texts(&d.change);
-        if cur_old != old || cur_new != new {
-            self.error = Some(format!(
-                "{} changed on disk. The diff was refreshed; try again.",
-                d.change.file_name()
-            ));
-            self.refresh(cx);
+        let (change, shown) = (d.change.clone(), d.fingerprint);
+        if direction == MergeDirection::ToLeft && change.staged {
+            self.error = Some("HEAD can't be changed from the diff.".into());
+            cx.notify();
             return;
         }
-        let result = match (direction, staged) {
-            (MergeDirection::ToRight, false) => {
-                let text = crate::merge::splice_lines(&new, range.new, &old, range.old);
-                repo.write_worktree(&path, &text)
+        let Some(repo) = &self.repo else { return };
+        let (disk_old, disk_new, _, _) = repo.change_texts(&change);
+        let tab = &mut self.tabs[ix];
+        let draft = tab.draft.get_or_insert_with(|| Draft {
+            left: None,
+            right: None,
+            base: fingerprint(&disk_old, &disk_new),
+        });
+        let old = draft.left.clone().unwrap_or_else(|| disk_old.clone());
+        let new = draft.right.clone().unwrap_or_else(|| disk_new.clone());
+        if fingerprint(&old, &new) != shown {
+            // The view is stale (the file changed outside); redraw before editing.
+            if draft.left.is_none() && draft.right.is_none() {
+                tab.draft = None;
             }
-            (MergeDirection::ToLeft, false) => {
-                let text = crate::merge::splice_lines(&old, range.old, &new, range.new);
-                repo.write_index(&path, &text)
+            self.error = Some(format!(
+                "{} changed on disk. The diff was refreshed; try again.",
+                change.file_name()
+            ));
+            self.load_tab(ix, false);
+            cx.notify();
+            return;
+        }
+        match direction {
+            MergeDirection::ToRight => {
+                draft.right = Some(crate::merge::splice_lines(&new, range.new, &old, range.old))
             }
-            (MergeDirection::ToRight, true) => {
-                let text = crate::merge::splice_lines(&new, range.new, &old, range.old);
-                repo.write_index(&path, &text)
+            MergeDirection::ToLeft => {
+                draft.left = Some(crate::merge::splice_lines(&old, range.old, &new, range.new))
             }
-            (MergeDirection::ToLeft, true) => {
-                Err(anyhow::anyhow!("HEAD can't be changed from the diff."))
-            }
+        }
+        // A side edited back to what is on disk is no longer unsaved.
+        if draft.left.as_deref() == Some(disk_old.as_str()) {
+            draft.left = None;
+        }
+        if draft.right.as_deref() == Some(disk_new.as_str()) {
+            draft.right = None;
+        }
+        if draft.left.is_none() && draft.right.is_none() {
+            tab.draft = None;
+        }
+        // Editing a preview tab keeps it open, as in an editor.
+        tab.pinned = true;
+        self.load_tab(ix, false);
+        cx.notify();
+    }
+
+    pub fn has_unsaved(&self) -> bool {
+        self.tabs.iter().any(|t| t.draft.is_some())
+    }
+
+    /// Writes a tab's draft to the index and/or working tree. Asks first if the
+    /// file changed on disk since editing began.
+    pub fn save_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(ix) else { return };
+        let Some(draft) = tab.draft.clone() else {
+            return;
         };
-        self.error = result.err().map(|e| format!("{e:#}"));
-        self.refresh(cx);
+        let (staged, path) = (tab.staged, tab.path.clone());
+        let Some(repo) = &self.repo else { return };
+        let on_disk = self.list(staged).iter().find(|c| c.path == path).map(|c| {
+            let (old, new, _, _) = repo.change_texts(c);
+            fingerprint(&old, &new)
+        });
+        if on_disk != Some(draft.base) {
+            let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+            let answer = window.prompt(
+                PromptLevel::Warning,
+                &format!("{name} changed on disk since you started editing."),
+                Some("Saving replaces those outside changes with your edits."),
+                &["Overwrite", "Cancel"],
+                cx,
+            );
+            cx.spawn(async move |this, cx| {
+                if answer.await == Ok(0) {
+                    this.update(cx, |this, cx| this.write_draft(ix, cx)).ok();
+                }
+            })
+            .detach();
+            return;
+        }
+        self.write_draft(ix, cx);
+    }
+
+    pub(super) fn write_draft(&mut self, ix: usize, cx: &mut Context<Self>) -> bool {
+        let Some(tab) = self.tabs.get(ix) else {
+            return false;
+        };
+        let Some(draft) = tab.draft.clone() else {
+            return true;
+        };
+        let (staged, path) = (tab.staged, tab.path.clone());
+        let ok = self.run(cx, |r| {
+            if staged {
+                // Left is HEAD (read-only); right is the index.
+                if let Some(text) = &draft.right {
+                    r.write_index(&path, text)?;
+                }
+            } else {
+                if let Some(text) = &draft.left {
+                    r.write_index(&path, text)?;
+                }
+                if let Some(text) = &draft.right {
+                    r.write_worktree(&path, text)?;
+                }
+            }
+            Ok(())
+        });
+        if ok {
+            if let Some(tab) = self
+                .tabs
+                .iter_mut()
+                .find(|t| t.staged == staged && t.path == path)
+            {
+                tab.draft = None;
+            }
+            self.refresh(cx);
+            self.flash("Saved", cx);
+        }
+        ok
+    }
+
+    /// Drops a tab's unsaved edits and shows the files on disk again.
+    pub fn discard_draft(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get_mut(ix) {
+            tab.draft = None;
+            self.load_tab(ix, false);
+            cx.notify();
+        }
+    }
+
+    /// Closes a tab, asking to save its unsaved edits first.
+    pub fn request_close_tab(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(ix) else { return };
+        if tab.draft.is_none() {
+            self.close_tab(ix, cx);
+            return;
+        }
+        let name = tab.path.rsplit('/').next().unwrap_or(&tab.path).to_string();
+        let key = (tab.staged, tab.path.clone());
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!("Save your changes to {name}?"),
+            Some("Your changes will be lost if you don't save them."),
+            &["Save", "Don't Save", "Cancel"],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            let choice = answer.await;
+            this.update(cx, |this, cx| {
+                // The tab may have moved while the prompt was open.
+                let Some(ix) = this
+                    .tabs
+                    .iter()
+                    .position(|t| (t.staged, t.path.clone()) == key)
+                else {
+                    return;
+                };
+                match choice {
+                    Ok(0) => {
+                        if this.write_draft(ix, cx) {
+                            if let Some(ix) = this
+                                .tabs
+                                .iter()
+                                .position(|t| (t.staged, t.path.clone()) == key)
+                            {
+                                this.close_tab(ix, cx);
+                            }
+                        }
+                    }
+                    Ok(1) => {
+                        this.tabs[ix].draft = None;
+                        this.close_tab(ix, cx);
+                    }
+                    _ => {}
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Runs `then` once every unsaved draft is saved or discarded, asking first.
+    pub fn confirm_unsaved(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        then: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
+    ) {
+        let count = self.tabs.iter().filter(|t| t.draft.is_some()).count();
+        if count == 0 {
+            then(self, window, cx);
+            return;
+        }
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!(
+                "Save changes to {count} file{}?",
+                if count == 1 { "" } else { "s" }
+            ),
+            Some("Your changes will be lost if you don't save them."),
+            &["Save All", "Don't Save", "Cancel"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let choice = answer.await;
+            this.update_in(cx, |this, window, cx| {
+                match choice {
+                    Ok(0) => {
+                        let mut ok = true;
+                        while let Some(ix) = this.tabs.iter().position(|t| t.draft.is_some()) {
+                            if !this.write_draft(ix, cx) {
+                                ok = false;
+                                break;
+                            }
+                        }
+                        if !ok {
+                            return;
+                        }
+                    }
+                    Ok(1) => {
+                        for tab in &mut this.tabs {
+                            tab.draft = None;
+                        }
+                    }
+                    _ => return,
+                }
+                then(this, window, cx)
+            })
+            .ok();
+        })
+        .detach();
     }
 
     // ---- git operations ----
@@ -695,6 +1019,11 @@ impl Workspace {
     pub fn commit(&mut self, mode: CommitMode, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
         if self.busy.is_some() {
+            return;
+        }
+        if self.has_unsaved() {
+            self.error = Some(UNSAVED_BEFORE_COMMIT.into());
+            cx.notify();
             return;
         }
         let message = self.message.read(cx).text().to_string();
@@ -1338,9 +1667,14 @@ impl Render for Workspace {
                     this.open_branch_picker(window, cx)
                 }),
             )
-            .on_action(cx.listener(|this, _: &CloseTab, _, cx| {
+            .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
                 if let Some(a) = this.active {
-                    this.close_tab(a, cx)
+                    this.request_close_tab(a, window, cx)
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Save, window, cx| {
+                if let Some(a) = this.active {
+                    this.save_tab(a, window, cx)
                 }
             }))
             .on_action(cx.listener(|this, _: &NextTab, _, cx| this.cycle_tab(1, cx)))
@@ -1349,7 +1683,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &Pull, _, cx| this.remote(RemoteOp::Pull, cx)))
             .on_action(cx.listener(|this, _: &Push, _, cx| this.remote(RemoteOp::Push, cx)))
             .on_action(cx.listener(|this, _: &Sync, _, cx| this.remote(RemoteOp::Sync, cx)))
-            .on_action(|_: &Quit, _, cx| cx.quit())
+            .on_action(cx.listener(|this, _: &Quit, window, cx| {
+                this.confirm_unsaved(window, cx, |_, _, cx| cx.quit())
+            }))
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, _, cx| {

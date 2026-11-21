@@ -75,6 +75,9 @@ commands! {
     Refresh => "Refresh",
     RemoveRemote => "Remove Remote",
     RenameBranch => "Rename Branch...",
+    RevertUnsaved => "Revert Unsaved Edits",
+    SaveChanges => "Save",
+    SaveAll => "Save All",
     StageAll => "Stage All Changes",
     StageAllMerge => "Stage All Merge Changes",
     StageAllTracked => "Stage All Tracked Changes",
@@ -291,10 +294,27 @@ impl Workspace {
             // ---- tabs ----
             Cmd::OpenAllChanges => self.open_all(false, cx),
             Cmd::OpenStagedChanges => self.open_all(true, cx),
-            Cmd::CloseAllDiffs => {
-                self.tabs.clear();
-                self.active = None;
+            Cmd::CloseAllDiffs => self.confirm_unsaved(window, cx, |this, _, cx| {
+                this.tabs.clear();
+                this.active = None;
                 cx.notify();
+            }),
+            Cmd::SaveChanges => {
+                if let Some(a) = self.active {
+                    self.save_tab(a, window, cx)
+                }
+            }
+            Cmd::SaveAll => {
+                while let Some(ix) = self.tabs.iter().position(|t| t.draft.is_some()) {
+                    if !self.write_draft(ix, cx) {
+                        break;
+                    }
+                }
+            }
+            Cmd::RevertUnsaved => {
+                if let Some(a) = self.active {
+                    self.discard_draft(a, cx)
+                }
             }
             Cmd::Refresh => self.refresh(cx),
             Cmd::ToggleBlame => {
@@ -792,6 +812,11 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if self.busy.is_some() {
+            return;
+        }
+        if self.has_unsaved() {
+            self.error = Some(super::workspace::UNSAVED_BEFORE_COMMIT.into());
+            cx.notify();
             return;
         }
         let scope = match scope {
