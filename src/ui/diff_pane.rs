@@ -136,7 +136,7 @@ impl Workspace {
                 .flex()
                 .flex_col()
                 .child(self.render_rows(count, scroll, cx))
-                .children(self.render_scroll_indicators(&t))
+                .children(self.render_scroll_indicators(&t, cx))
                 .child(
                     gpui::canvas(
                         move |bounds, _, _| width.set(f32::from(bounds.size.width)),
@@ -269,50 +269,163 @@ impl Workspace {
         (diff.rows.len() as f32 * ROW_HEIGHT - view_h).max(0.)
     }
 
-    /// Thin scroll position bars over the right and bottom edges of the diff.
-    fn render_scroll_indicators(&self, t: &Theme) -> Vec<gpui::AnyElement> {
+    /// Scrollbars over the right and bottom edges of the diff. Drag a thumb to
+    /// scroll, or click the track to jump there.
+    fn render_scroll_indicators(&self, t: &Theme, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         let Some(tab) = self.active_tab() else {
             return vec![];
         };
         let base = tab.scroll.0.borrow().base_handle.clone();
         let (bounds, offset) = (base.bounds(), base.offset());
         let (view_w, view_h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
-        let color = t.muted.opacity(0.45);
         let mut bars = Vec::new();
         let max_y = self.max_v_scroll();
         if max_y > 0. && view_h > 0. {
-            let thumb = (view_h * view_h / (view_h + max_y)).max(MIN_THUMB);
-            let top = (view_h - thumb) * (-f32::from(offset.y) / max_y).clamp(0., 1.);
-            bars.push(
-                div()
-                    .absolute()
-                    .right(px(2.))
-                    .top(px(top))
-                    .w(px(SCROLLBAR))
-                    .h(px(thumb))
-                    .rounded(px(SCROLLBAR / 2.))
-                    .bg(color)
-                    .into_any_element(),
-            );
+            let thumb = (view_h * view_h / (view_h + max_y))
+                .max(MIN_THUMB)
+                .min(view_h);
+            let value = (-f32::from(offset.y)).clamp(0., max_y);
+            let geometry = Scrollbar {
+                vertical: true,
+                track_start: f32::from(bounds.origin.y),
+                track_len: view_h,
+                thumb,
+                value,
+                max: max_y,
+            };
+            bars.push(self.render_scrollbar(geometry, t, cx));
         }
         let max_x = self.max_h_scroll();
         if max_x > 0. && view_w > 0. {
             let code = self.code_width().max(1.);
-            let thumb = (view_w * code / (code + max_x)).max(MIN_THUMB);
-            let left = (view_w - thumb) * (tab.h_scroll / max_x).clamp(0., 1.);
-            bars.push(
-                div()
-                    .absolute()
-                    .bottom(px(2.))
-                    .left(px(left))
-                    .h(px(SCROLLBAR))
-                    .w(px(thumb))
-                    .rounded(px(SCROLLBAR / 2.))
-                    .bg(color)
-                    .into_any_element(),
-            );
+            // Leave the corner to the vertical bar.
+            let track_len = if max_y > 0. { view_w - TRACK } else { view_w };
+            let thumb = (track_len * code / (code + max_x))
+                .max(MIN_THUMB)
+                .min(track_len);
+            let geometry = Scrollbar {
+                vertical: false,
+                track_start: f32::from(bounds.origin.x),
+                track_len,
+                thumb,
+                value: tab.h_scroll.clamp(0., max_x),
+                max: max_x,
+            };
+            bars.push(self.render_scrollbar(geometry, t, cx));
         }
         bars
+    }
+
+    fn render_scrollbar(
+        &self,
+        bar: Scrollbar,
+        t: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::AnyElement {
+        let travel = (bar.track_len - bar.thumb).max(1.);
+        let thumb_at = travel * (bar.value / bar.max);
+        let dragging = self
+            .scrollbar_drag
+            .is_some_and(|d| d.vertical == bar.vertical);
+        let (idle, strong) = (t.muted.opacity(0.45), t.muted.opacity(0.8));
+        let group = if bar.vertical {
+            "vscrollbar"
+        } else {
+            "hscrollbar"
+        };
+        let thumb = div()
+            .absolute()
+            .rounded(px(SCROLLBAR / 2.))
+            .bg(if dragging { strong } else { idle })
+            .group_hover(group, move |s| s.bg(strong));
+        let thumb = if bar.vertical {
+            thumb
+                .top(px(thumb_at))
+                .right(px(2.))
+                .w(px(SCROLLBAR))
+                .h(px(bar.thumb))
+        } else {
+            thumb
+                .left(px(thumb_at))
+                .bottom(px(2.))
+                .h(px(SCROLLBAR))
+                .w(px(bar.thumb))
+        };
+        let track = div()
+            .id(group)
+            .group(group)
+            .absolute()
+            .child(thumb)
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(move |this, e: &gpui::MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    let pointer = if bar.vertical {
+                        f32::from(e.position.y)
+                    } else {
+                        f32::from(e.position.x)
+                    };
+                    let at = pointer - bar.track_start;
+                    let mut value = bar.value;
+                    if at < thumb_at || at > thumb_at + bar.thumb {
+                        // Clicked the track: centre the thumb on the pointer.
+                        value = ((at - bar.thumb / 2.) / travel * bar.max).clamp(0., bar.max);
+                        this.set_diff_scroll(bar.vertical, value, cx);
+                    }
+                    this.scrollbar_drag = Some(ScrollbarDrag {
+                        vertical: bar.vertical,
+                        start_pointer: pointer,
+                        start_value: value,
+                        per_px: bar.max / travel,
+                    });
+                    cx.notify();
+                }),
+            );
+        if bar.vertical {
+            track.top_0().right_0().w(px(TRACK)).h(px(bar.track_len))
+        } else {
+            track.bottom_0().left_0().h(px(TRACK)).w(px(bar.track_len))
+        }
+        .into_any_element()
+    }
+
+    /// Follows the pointer while a scrollbar thumb is dragged.
+    pub(super) fn drag_scrollbar(&mut self, e: &gpui::MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some(drag) = self.scrollbar_drag else {
+            return;
+        };
+        if e.pressed_button != Some(gpui::MouseButton::Left) {
+            // The button came up outside the window.
+            self.scrollbar_drag = None;
+            cx.notify();
+            return;
+        }
+        let pointer = if drag.vertical {
+            f32::from(e.position.y)
+        } else {
+            f32::from(e.position.x)
+        };
+        let value = drag.start_value + (pointer - drag.start_pointer) * drag.per_px;
+        self.set_diff_scroll(drag.vertical, value, cx);
+    }
+
+    /// Scrolls the diff to `value` pixels from the top (or from the left).
+    fn set_diff_scroll(&mut self, vertical: bool, value: f32, cx: &mut Context<Self>) {
+        if vertical {
+            let max = self.max_v_scroll();
+            let Some(tab) = self.active_tab() else { return };
+            let base = tab.scroll.0.borrow().base_handle.clone();
+            let y = -value.clamp(0., max);
+            base.set_offset(gpui::point(base.offset().x, px(y)));
+            self.lock_y = y;
+        } else {
+            let max = self.max_h_scroll();
+            let Some(tab) = self.active.and_then(|a| self.tabs.get_mut(a)) else {
+                return;
+            };
+            tab.h_scroll = value.clamp(0., max);
+        }
+        cx.notify();
     }
 
     fn render_tabs(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -635,6 +748,31 @@ const CODE_SIZE: f32 = 12.5;
 /// Thickness of the scroll position bars.
 const SCROLLBAR: f32 = 6.;
 const MIN_THUMB: f32 = 24.;
+/// Thickness of the clickable strip each scrollbar sits in.
+const TRACK: f32 = 12.;
+
+/// Where a scrollbar is and what it shows, in pixels along its axis.
+#[derive(Clone, Copy)]
+struct Scrollbar {
+    vertical: bool,
+    /// Window position where the track begins.
+    track_start: f32,
+    track_len: f32,
+    thumb: f32,
+    /// Current scroll, from 0 to `max`.
+    value: f32,
+    max: f32,
+}
+
+/// A scrollbar thumb being dragged.
+#[derive(Clone, Copy)]
+pub(super) struct ScrollbarDrag {
+    vertical: bool,
+    start_pointer: f32,
+    start_value: f32,
+    /// Content pixels scrolled per pixel of pointer movement.
+    per_px: f32,
+}
 /// Scale applied to trackpad pixel deltas when scrolling sideways.
 const TRACKPAD_SPEED: f32 = 0.6;
 /// Events further apart than this start a new scroll gesture.

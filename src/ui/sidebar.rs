@@ -17,8 +17,10 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let t = cx.theme().clone();
+        // Keep room for the diff pane when the window is narrower than at drag time.
+        let max = (f32::from(window.viewport_size().width) - 340.).max(200.);
         div()
-            .w(px(300.))
+            .w(px(self.sidebar_width.min(max)))
             .flex_none()
             .flex()
             .flex_col()

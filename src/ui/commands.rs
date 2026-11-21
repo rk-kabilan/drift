@@ -62,6 +62,7 @@ commands! {
     FetchAll => "Fetch From All Remotes",
     Init => "Initialize Repository...",
     MergeBranch => "Merge Branch...",
+    NewWindow => "New Window",
     OpenAllChanges => "Open All Changes",
     OpenRecent => "Open Recent Repository...",
     OpenRepository => "Open Repository...",
@@ -104,7 +105,7 @@ impl Cmd {
     fn needs_repo(self) -> bool {
         !matches!(
             self,
-            Cmd::Clone | Cmd::Init | Cmd::OpenRecent | Cmd::OpenRepository
+            Cmd::Clone | Cmd::Init | Cmd::NewWindow | Cmd::OpenRecent | Cmd::OpenRepository
         )
     }
 }
@@ -202,6 +203,7 @@ impl Workspace {
             Cmd::Clone => self.clone_repo_dialog(window, cx),
             Cmd::Init => self.new_repo_dialog(window, cx),
             Cmd::CloseRepository => self.close_repo(window, cx),
+            Cmd::NewWindow => self.new_window(window, cx),
 
             // ---- commit ----
             Cmd::Commit => self.commit_cmd(Scope::Smart, no_opts, window, cx),

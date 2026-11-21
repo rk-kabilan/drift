@@ -12,13 +12,9 @@ mod ui;
 
 use std::path::PathBuf;
 
-use gpui::{
-    px, size, App, AppContext as _, Application, Bounds, TitlebarOptions, WindowBounds,
-    WindowOptions,
-};
+use gpui::{App, Application};
 
-use crate::theme::{pick_font, Appearance, Theme, ThemeState};
-use crate::ui::Workspace;
+use crate::theme::{pick_font, Theme, ThemeState};
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
@@ -74,37 +70,7 @@ fn main() {
             cx.bind_keys(ui::text_input::key_bindings());
             cx.bind_keys(ui::actions_bindings());
 
-            let bounds = Bounds::centered(None, size(px(1280.), px(800.)), cx);
-            let window = cx
-                .open_window(
-                    WindowOptions {
-                        window_bounds: Some(WindowBounds::Windowed(bounds)),
-                        titlebar: Some(TitlebarOptions {
-                            title: Some("drift".into()),
-                            appears_transparent: cfg!(target_os = "macos"),
-                            traffic_light_position: Some(gpui::point(px(12.), px(11.))),
-                        }),
-                        window_min_size: Some(size(px(760.), px(420.))),
-                        app_id: Some("drift".into()),
-                        ..Default::default()
-                    },
-                    |window, cx| {
-                        // DRIFT_THEME=light|dark pins the theme; otherwise it follows the OS.
-                        let forced = match std::env::var("DRIFT_THEME").as_deref() {
-                            Ok("dark") => Some(Appearance::Dark),
-                            Ok("light") => Some(Appearance::Light),
-                            _ => None,
-                        };
-                        let appearance =
-                            forced.unwrap_or_else(|| Appearance::from(window.appearance()));
-                        let state = cx.global_mut::<ThemeState>();
-                        state.theme = Theme::for_appearance(appearance);
-                        state.forced = forced;
-                        cx.new(|cx| Workspace::new(start.clone(), window, cx))
-                    },
-                )
-                .expect("failed to open the main window");
-            let _ = window;
+            ui::open_window(start, None, cx);
             cx.on_window_closed(|cx| {
                 if cx.windows().is_empty() {
                     cx.quit();

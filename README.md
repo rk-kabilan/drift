@@ -23,7 +23,7 @@ cargo run --release              # opens the repository containing the current f
 cargo run --release -- ~/code/x  # or a given path
 ```
 
-Started anywhere else (or from the Dock, Start menu or app launcher), drift shows a welcome screen: open a repository folder, clone one, create a new one, or pick one of the last ten you opened. The recent list is kept in `~/Library/Application Support/drift/` on macOS, `%APPDATA%\drift\` on Windows and `~/.local/state/drift/` on Linux.
+Started anywhere else (or from the Dock, Start menu or app launcher), drift shows a welcome screen: open a repository folder, clone one, create a new one, or pick one of the last ten you opened. Each repository opens in its own window; the welcome window becomes the first one you open from it. The recent list is kept in `~/Library/Application Support/drift/` on macOS, `%APPDATA%\drift\` on Windows and `~/.local/state/drift/` on Linux.
 
 **Linux** also needs the usual GPUI system libraries, for example on Debian/Ubuntu:
 
@@ -59,7 +59,8 @@ The icon lives in `assets/app-icon/` (`drift.svg` is the master; `drift-macos.sv
 | `Enter`, `Shift+Enter` | New line in the message |
 | `F7` / `Shift+F7` | Next / previous change |
 | `F5`, `Ctrl+R` / `Cmd+R` | Refresh |
-| `Ctrl+O` / `Cmd+O` | Open a repository |
+| `Ctrl+O` / `Cmd+O` | Open a repository in a new window (or bring its window forward) |
+| `Ctrl+Shift+N` / `Cmd+Shift+N` | New window |
 | `Ctrl+Q` / `Cmd+Q` | Quit |
 
 ## Layout of the code

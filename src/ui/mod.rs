@@ -9,4 +9,4 @@ mod welcome;
 mod widgets;
 mod workspace;
 
-pub use workspace::{actions_bindings, Workspace};
+pub use workspace::{actions_bindings, open_window};

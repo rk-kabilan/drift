@@ -39,9 +39,96 @@ actions!(
         Sync,
         Save,
         OpenRepository,
+        NewWindow,
         Quit
     ]
 );
+
+/// Opens a drift window. `start` is as for [`Workspace::new`]; `cascade` is the
+/// window to offset the new one from, so the two don't sit exactly on top of
+/// each other.
+pub fn open_window(
+    start: Option<(PathBuf, bool)>,
+    cascade: Option<gpui::Bounds<gpui::Pixels>>,
+    cx: &mut gpui::App,
+) {
+    let bounds = match cascade {
+        Some(b) => gpui::Bounds::new(b.origin + gpui::point(px(28.), px(28.)), b.size),
+        None => gpui::Bounds::centered(None, gpui::size(px(1280.), px(800.)), cx),
+    };
+    let result = cx.open_window(
+        gpui::WindowOptions {
+            window_bounds: Some(gpui::WindowBounds::Windowed(bounds)),
+            titlebar: Some(gpui::TitlebarOptions {
+                title: Some("drift".into()),
+                appears_transparent: cfg!(target_os = "macos"),
+                traffic_light_position: Some(gpui::point(px(12.), px(11.))),
+            }),
+            window_min_size: Some(gpui::size(px(760.), px(420.))),
+            app_id: Some("drift".into()),
+            ..Default::default()
+        },
+        move |window, cx| {
+            // DRIFT_THEME=light|dark pins the theme; otherwise it follows the OS.
+            let forced = match std::env::var("DRIFT_THEME").as_deref() {
+                Ok("dark") => Some(Appearance::Dark),
+                Ok("light") => Some(Appearance::Light),
+                _ => None,
+            };
+            let appearance = forced.unwrap_or_else(|| Appearance::from(window.appearance()));
+            let state = cx.global_mut::<ThemeState>();
+            state.theme = Theme::for_appearance(appearance);
+            state.forced = forced;
+            cx.new(|cx| Workspace::new(start, window, cx))
+        },
+    );
+    if let Err(e) = result {
+        log::error!("could not open a window: {e:#}");
+    }
+}
+
+/// Brings forward the window that has the repository at `root` open, if any.
+pub(super) fn activate_repo_window(root: &std::path::Path, cx: &mut gpui::App) -> bool {
+    let found = cx.windows().into_iter().find_map(|handle| {
+        let ws = handle.downcast::<Workspace>()?;
+        ws.read(cx)
+            .is_ok_and(|w| w.repo.is_some() && w.root == root)
+            .then_some(ws)
+    });
+    match found {
+        Some(ws) => ws
+            .update(cx, |_, window, _| window.activate_window())
+            .is_ok(),
+        None => false,
+    }
+}
+
+/// Quits after every window with unsaved edits has been asked about, one at a time.
+pub fn quit(cx: &mut gpui::App) {
+    let unsaved = cx.windows().into_iter().find_map(|handle| {
+        let ws = handle.downcast::<Workspace>()?;
+        ws.read(cx).is_ok_and(|w| w.has_unsaved()).then_some(ws)
+    });
+    match unsaved {
+        Some(ws) => {
+            ws.update(cx, |this, window, cx| {
+                window.activate_window();
+                // Saved or discarded: look at the next window. Cancel stops here.
+                this.confirm_unsaved(window, cx, |_, _, cx| cx.defer(quit));
+            })
+            .ok();
+        }
+        None => cx.quit(),
+    }
+}
+
+/// Default width of the changes pane, and the limits the divider can drag it to.
+const SIDEBAR_WIDTH: f32 = 300.;
+const SIDEBAR_MIN: f32 = 200.;
+/// Width the diff pane always keeps.
+const DIFF_MIN: f32 = 320.;
+/// Hit area of the divider between the panes (also the gap between them).
+const DIVIDER: f32 = 6.;
 
 pub fn actions_bindings() -> Vec<KeyBinding> {
     vec![
@@ -60,6 +147,7 @@ pub fn actions_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-q", Quit, None),
         KeyBinding::new("secondary-s", Save, None),
         KeyBinding::new("secondary-o", OpenRepository, None),
+        KeyBinding::new("secondary-shift-n", NewWindow, None),
     ]
 }
 
@@ -225,6 +313,12 @@ pub struct Workspace {
     picker_is_files: bool,
     pub(super) recent_commands: Vec<super::commands::Cmd>,
     pub(super) show_blame: bool,
+    /// Width of the changes pane, set by dragging the divider next to it.
+    pub(super) sidebar_width: f32,
+    /// While the divider is dragged: the pointer x and the pane width at the start.
+    sidebar_drag: Option<(f32, f32)>,
+    /// The diff scrollbar thumb being dragged, if any.
+    pub(super) scrollbar_drag: Option<super::diff_pane::ScrollbarDrag>,
     /// Width of the diff list, measured at paint, for clamping horizontal scroll.
     pub(super) diff_width: std::rc::Rc<std::cell::Cell<f32>>,
     /// Advance of one character of the code font.
@@ -260,6 +354,11 @@ impl Workspace {
             ];
         subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
+                if this.repo.is_none() {
+                    // Another window may have opened a repository meanwhile.
+                    this.recent = crate::recent::load();
+                    cx.notify();
+                }
                 this.refresh(cx);
             }
         }));
@@ -323,6 +422,9 @@ impl Workspace {
             picker_is_files: false,
             recent_commands: Vec::new(),
             show_blame: true,
+            sidebar_width: SIDEBAR_WIDTH,
+            sidebar_drag: None,
+            scrollbar_drag: None,
             diff_width: Default::default(),
             char_width: None,
             scroll_axis: None,
@@ -367,6 +469,7 @@ impl Workspace {
         self._picker_subscription = None;
         self.picker_is_files = false;
         self.scroll_axis = None;
+        self.scrollbar_drag = None;
         self.lock_y = 0.;
         self.message.update(cx, |m, cx| m.set_text("", cx));
         match repo {
@@ -1523,6 +1626,44 @@ impl Workspace {
     /// The title bar shows only the repository and branch. It is drawn by the app
     /// on macOS (transparent title bar) and on Linux desktops without server-side
     /// decorations, where it also carries the window controls.
+    /// The draggable divider between the changes pane and the diff pane.
+    /// Double-click puts it back to the default width.
+    fn render_divider(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = cx.theme();
+        let line = t.accent;
+        let active = self.sidebar_drag.is_some();
+        div()
+            .id("sidebar-divider")
+            .group("sidebar-divider")
+            .w(px(DIVIDER))
+            .h_full()
+            .flex_none()
+            .flex()
+            .justify_center()
+            .cursor_col_resize()
+            .child(
+                div()
+                    .w(px(2.))
+                    .h_full()
+                    .rounded(px(1.))
+                    .when(active, |d| d.bg(line))
+                    .group_hover("sidebar-divider", |s| s.bg(line.opacity(0.6))),
+            )
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|this, e: &gpui::MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    if e.click_count >= 2 {
+                        this.sidebar_width = SIDEBAR_WIDTH;
+                        this.sidebar_drag = None;
+                    } else {
+                        this.sidebar_drag = Some((f32::from(e.position.x), this.sidebar_width));
+                    }
+                    cx.notify();
+                }),
+            )
+    }
+
     fn render_title_bar(&self, client_decorated: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme();
         let fg = t.fg;
@@ -1541,14 +1682,18 @@ impl Workspace {
             .gap(px(6.))
             .text_size(px(12.))
             .text_color(t.muted)
-            .when(client_decorated, |d| {
-                d.on_mouse_down(gpui::MouseButton::Left, |e, window, _| {
-                    if e.click_count >= 2 {
-                        window.zoom_window();
+            .on_mouse_down(gpui::MouseButton::Left, move |e, window, _| {
+                if e.click_count >= 2 {
+                    // macOS does what System Settings asks for (zoom by default);
+                    // elsewhere double-click maximizes or restores.
+                    if cfg!(target_os = "macos") {
+                        window.titlebar_double_click();
                     } else {
-                        window.start_window_move();
+                        window.zoom_window();
                     }
-                })
+                } else if client_decorated {
+                    window.start_window_move();
+                }
             })
             .child(super::widgets::icon("repo", t.muted))
             .child(self.title())
@@ -1665,17 +1810,57 @@ impl Render for Workspace {
                 .flex_1()
                 .min_h_0()
                 .flex()
-                .gap(px(6.))
                 .px(px(6.))
                 .pb(px(6.))
                 .child(self.render_sidebar(window, cx))
+                .child(self.render_divider(cx))
                 .child(self.render_diff_pane(window, cx))
                 .into_any_element()
         };
 
+        let dragging = self.sidebar_drag.is_some();
+        let scrollbar_dragging = self.scrollbar_drag.is_some();
         div()
             .id("workspace")
             .key_context("Workspace")
+            .when(scrollbar_dragging, |d| {
+                d.on_mouse_move(
+                    cx.listener(|this, e: &gpui::MouseMoveEvent, _, cx| this.drag_scrollbar(e, cx)),
+                )
+                .on_mouse_up(
+                    gpui::MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.scrollbar_drag = None;
+                        cx.notify();
+                    }),
+                )
+            })
+            .when(dragging, |d| {
+                d.cursor_col_resize()
+                    .on_mouse_move(cx.listener(|this, e: &gpui::MouseMoveEvent, window, cx| {
+                        let Some((start_x, start_w)) = this.sidebar_drag else {
+                            return;
+                        };
+                        if e.pressed_button != Some(gpui::MouseButton::Left) {
+                            // The button came up outside the window.
+                            this.sidebar_drag = None;
+                        } else {
+                            let max =
+                                (f32::from(window.viewport_size().width) - DIFF_MIN - 3. * DIVIDER)
+                                    .max(SIDEBAR_MIN);
+                            this.sidebar_width = (start_w + f32::from(e.position.x) - start_x)
+                                .clamp(SIDEBAR_MIN, max);
+                        }
+                        cx.notify();
+                    }))
+                    .on_mouse_up(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _, _, cx| {
+                            this.sidebar_drag = None;
+                            cx.notify();
+                        }),
+                    )
+            })
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &Commit, window, cx| {
                 this.commit(CommitMode::Staged, window, cx)
@@ -1727,9 +1912,11 @@ impl Render for Workspace {
                     this.open_repo_dialog(window, cx)
                 }),
             )
-            .on_action(cx.listener(|this, _: &Quit, window, cx| {
-                this.confirm_unsaved(window, cx, |_, _, cx| cx.quit())
+            .on_action(cx.listener(|_, _: &NewWindow, window, cx| {
+                let cascade = window.window_bounds().get_bounds();
+                cx.defer(move |cx| open_window(None, Some(cascade), cx));
             }))
+            .on_action(cx.listener(|_, _: &Quit, _, cx| cx.defer(quit)))
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, _, cx| {

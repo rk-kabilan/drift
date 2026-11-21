@@ -12,7 +12,7 @@ use gpui::{
 
 use super::picker::PickerItem;
 use super::widgets::{icon_sized, tooltip};
-use super::workspace::Workspace;
+use super::workspace::{activate_repo_window, open_window, Workspace};
 use crate::git::Repo;
 use crate::recent;
 use crate::theme::ActiveTheme as _;
@@ -53,16 +53,40 @@ fn folder_name(path: &Path) -> String {
 }
 
 impl Workspace {
-    /// Opens the repository containing `path`. A folder that isn't in a repository
-    /// gets an offer to initialize one there.
+    /// Opens the repository containing `path` in its own window. A window that
+    /// already has it comes to the front instead, and the welcome window turns into
+    /// the repository's window. A folder that isn't in a repository gets an offer
+    /// to initialize one there.
     pub fn open_repo(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        if self.busy.is_some() {
-            return;
-        }
         match Repo::discover(&path) {
-            Ok(repo) => self.confirm_unsaved(window, cx, move |this, window, cx| {
-                this.switch_repo(Some(repo), window, cx)
-            }),
+            Ok(repo) => {
+                let root = repo.root().to_path_buf();
+                if self.repo.is_some() && root == self.root {
+                    window.activate_window();
+                    return;
+                }
+                let here = window
+                    .window_handle()
+                    .downcast::<Workspace>()
+                    .filter(|_| self.repo.is_none() && self.busy.is_none());
+                let cascade = window.window_bounds().get_bounds();
+                // Deferred: other windows can only be looked at once this one's
+                // update has finished.
+                cx.defer(move |cx| {
+                    if activate_repo_window(&root, cx) {
+                        return;
+                    }
+                    let reused = here.is_some_and(|here| {
+                        here.update(cx, |this, window, cx| {
+                            this.switch_repo(Some(repo), window, cx)
+                        })
+                        .is_ok()
+                    });
+                    if !reused {
+                        open_window(Some((root, true)), Some(cascade), cx);
+                    }
+                });
+            }
             Err(_) if path.is_dir() => {
                 let answer = window.prompt(
                     PromptLevel::Info,
@@ -95,6 +119,12 @@ impl Workspace {
             self.welcome_error = Some(message);
         }
         cx.notify();
+    }
+
+    /// Opens an empty window on the welcome screen.
+    pub fn new_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let cascade = window.window_bounds().get_bounds();
+        cx.defer(move |cx| open_window(None, Some(cascade), cx));
     }
 
     /// Closes the open repository and shows the welcome screen.
