@@ -29,12 +29,36 @@ pub struct PickerItem {
 
 pub enum PickerEvent {
     Confirm(usize),
+    /// The typed text was accepted: a "create …" row, or a text prompt.
+    Text(String),
+    /// The query changed (sent after filtering).
+    QueryChanged(String),
     Dismiss,
 }
 
 enum ListRow {
     Header(&'static str),
-    Item { item: usize, positions: Vec<usize> },
+    Item {
+        item: usize,
+        positions: Vec<usize>,
+    },
+    /// Accepts the typed text, e.g. "Create new branch 'x'" or a prompt hint.
+    Text(String),
+}
+
+/// Lets the picker accept free text as well as (or instead of) an item.
+enum TextMode {
+    None,
+    /// Shows a "create" row when the query matches no item name exactly.
+    Create {
+        label: Box<dyn Fn(&str) -> String>,
+        exact: Vec<String>,
+    },
+    /// A text prompt with no list: the hint row confirms the typed text.
+    Prompt {
+        hint: String,
+        allow_empty: bool,
+    },
 }
 
 pub struct Picker {
@@ -45,6 +69,9 @@ pub struct Picker {
     selected: Option<usize>,
     scroll: UniformListScrollHandle,
     empty_text: SharedString,
+    text_mode: TextMode,
+    /// Stripped from the query before matching (">" in the command palette).
+    query_prefix: Option<&'static str>,
     _subscription: gpui::Subscription,
 }
 
@@ -84,14 +111,68 @@ impl Picker {
             selected: None,
             scroll: UniformListScrollHandle::new(),
             empty_text: empty_text.into(),
+            text_mode: TextMode::None,
+            query_prefix: None,
             _subscription: subscription,
         };
         this.filter(cx);
         this
     }
 
+    /// A text prompt: no list, Enter accepts what was typed.
+    pub fn prompt(
+        placeholder: impl Into<SharedString>,
+        hint: impl Into<String>,
+        allow_empty: bool,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::new(placeholder, "", vec![], cx);
+        this.text_mode = TextMode::Prompt {
+            hint: hint.into(),
+            allow_empty,
+        };
+        this.filter(cx);
+        this
+    }
+
+    /// Adds a row that accepts the typed text when it matches no name in `exact`.
+    pub fn with_create(
+        mut self,
+        label: impl Fn(&str) -> String + 'static,
+        exact: Vec<String>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        self.text_mode = TextMode::Create {
+            label: Box::new(label),
+            exact,
+        };
+        self.filter(cx);
+        self
+    }
+
+    pub fn with_query_prefix(mut self, prefix: &'static str, cx: &mut Context<Self>) -> Self {
+        self.query_prefix = Some(prefix);
+        self.filter(cx);
+        self
+    }
+
+    pub fn set_query(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
+        let text = text.into();
+        self.input.update(cx, |input, cx| input.set_text(text, cx));
+        self.filter(cx);
+    }
+
+    fn query(&self, cx: &App) -> String {
+        let raw = self.input.read(cx).text();
+        let q = match self.query_prefix {
+            Some(p) => raw.strip_prefix(p).unwrap_or(raw),
+            None => raw,
+        };
+        q.trim().to_string()
+    }
+
     fn filter(&mut self, cx: &mut Context<Self>) {
-        let query = self.input.read(cx).text().to_string();
+        let query = self.query(cx);
         let mut matches: Vec<(usize, i64, Vec<usize>)> = self
             .items
             .iter()
@@ -127,12 +208,34 @@ impl Picker {
             }
             self.rows.push(ListRow::Item { item, positions });
         }
-        self.selected = self
-            .rows
-            .iter()
-            .position(|r| matches!(r, ListRow::Item { .. }));
+        match &self.text_mode {
+            TextMode::None => {}
+            TextMode::Create { label, exact } => {
+                if !query.is_empty() && !exact.contains(&query) {
+                    // Last when names match, so Enter picks the best match.
+                    self.rows.push(ListRow::Text(label(&query)));
+                }
+            }
+            TextMode::Prompt { hint, .. } => self.rows.push(ListRow::Text(hint.clone())),
+        }
+        self.selected = self.rows.iter().position(|r| match r {
+            ListRow::Item { .. } => true,
+            ListRow::Text(_) => self.text_acceptable(&query),
+            ListRow::Header(_) => false,
+        });
         self.scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
+        cx.emit(PickerEvent::QueryChanged(
+            self.input.read(cx).text().to_string(),
+        ));
         cx.notify();
+    }
+
+    fn text_acceptable(&self, query: &str) -> bool {
+        match &self.text_mode {
+            TextMode::None => false,
+            TextMode::Create { .. } => !query.is_empty(),
+            TextMode::Prompt { allow_empty, .. } => *allow_empty || !query.is_empty(),
+        }
     }
 
     fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -140,7 +243,7 @@ impl Picker {
             .rows
             .iter()
             .enumerate()
-            .filter(|(_, r)| matches!(r, ListRow::Item { .. }))
+            .filter(|(_, r)| matches!(r, ListRow::Item { .. } | ListRow::Text(_)))
             .map(|(i, _)| i)
             .collect();
         if items.is_empty() {
@@ -158,8 +261,15 @@ impl Picker {
     }
 
     fn confirm(&mut self, cx: &mut Context<Self>) {
-        if let Some(ListRow::Item { item, .. }) = self.selected.and_then(|s| self.rows.get(s)) {
-            cx.emit(PickerEvent::Confirm(*item));
+        match self.selected.and_then(|s| self.rows.get(s)) {
+            Some(ListRow::Item { item, .. }) => cx.emit(PickerEvent::Confirm(*item)),
+            Some(ListRow::Text(_)) => {
+                let query = self.query(cx);
+                if self.text_acceptable(&query) {
+                    cx.emit(PickerEvent::Text(query));
+                }
+            }
+            _ => {}
         }
     }
 
@@ -178,6 +288,38 @@ impl Picker {
                 .text_color(t.muted)
                 .child(title.to_uppercase())
                 .into_any_element(),
+            ListRow::Text(label) => {
+                let selected = self.selected == Some(ix);
+                let prompt = matches!(self.text_mode, TextMode::Prompt { .. });
+                let hover = t.hover;
+                div()
+                    .id(ix)
+                    .w_full()
+                    .h(px(ROW_HEIGHT))
+                    .px(px(10.))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .rounded(px(4.))
+                    .when(selected, |d| d.bg(t.sel).text_color(t.sel_fg))
+                    .when(!selected && !prompt, |d| d.hover(move |s| s.bg(hover)))
+                    .when(prompt && !selected, |d| d.text_color(t.muted))
+                    .when(!prompt, |d| {
+                        d.cursor_pointer()
+                            .child(icon("plus", if selected { t.sel_fg } else { t.accent }))
+                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(label.clone()),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| this.confirm_text(cx)))
+                    .into_any_element()
+            }
             ListRow::Item { item, positions } => {
                 let it = &self.items[*item];
                 let selected = self.selected == Some(ix);
@@ -213,7 +355,9 @@ impl Picker {
                     .cursor_pointer()
                     .when(selected, |d| d.bg(t.sel).text_color(t.sel_fg))
                     .when(!selected, |d| d.hover(move |s| s.bg(hover)))
-                    .child(icon(it.icon, it.icon_color.unwrap_or(t.muted)))
+                    .when(!it.icon.is_empty(), |d| {
+                        d.child(icon(it.icon, it.icon_color.unwrap_or(t.muted)))
+                    })
                     .child(
                         div()
                             .flex_none()
@@ -258,6 +402,15 @@ impl Picker {
     }
 }
 
+impl Picker {
+    fn confirm_text(&mut self, cx: &mut Context<Self>) {
+        let query = self.query(cx);
+        if self.text_acceptable(&query) {
+            cx.emit(PickerEvent::Text(query));
+        }
+    }
+}
+
 impl Render for Picker {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme().clone();
@@ -286,7 +439,9 @@ impl Render for Picker {
                     .line_height(px(18.))
                     .child(self.input.clone()),
             )
-            .child(if count == 0 {
+            .child(if count == 0 && self.empty_text.is_empty() {
+                div().into_any_element()
+            } else if count == 0 {
                 div()
                     .px(px(12.))
                     .py(px(8.))

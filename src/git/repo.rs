@@ -76,6 +76,34 @@ pub struct BranchInfo {
     pub time: i64,
 }
 
+/// Extra flags for a commit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CommitOptions {
+    pub amend: bool,
+    /// Adds a `Signed-off-by` trailer.
+    pub signoff: bool,
+    /// Allows a commit with no changes.
+    pub allow_empty: bool,
+}
+
+/// A tag, newest first in [`Repo::tags`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TagInfo {
+    pub name: String,
+    pub short_sha: String,
+    pub summary: String,
+    pub time: i64,
+}
+
+/// An entry of `git stash list`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StashInfo {
+    /// `stash@{0}`.
+    pub reference: String,
+    pub message: String,
+    pub time: i64,
+}
+
 pub struct Repo {
     repo: Repository,
     root: PathBuf,
@@ -315,6 +343,17 @@ impl Repo {
     /// Commits the index. When amending with an empty message, the previous
     /// commit's message is kept.
     pub fn commit(&self, message: &str, amend: bool) -> Result<()> {
+        self.commit_with(
+            message,
+            CommitOptions {
+                amend,
+                ..Default::default()
+            },
+        )
+    }
+
+    pub fn commit_with(&self, message: &str, options: CommitOptions) -> Result<()> {
+        let amend = options.amend;
         let kept;
         let message = if amend && message.trim().is_empty() {
             kept = self.last_commit_message().unwrap_or_default();
@@ -329,7 +368,131 @@ impl Repo {
         if amend {
             args.push("--amend");
         }
+        if options.signoff {
+            args.push("--signoff");
+        }
+        if options.allow_empty {
+            args.push("--allow-empty");
+        }
         self.git(&args, Some(message)).map(drop)
+    }
+
+    /// Runs `git` with `args` in `root` and returns its stdout. For commands
+    /// with no dedicated method, and for running in the background.
+    pub fn run(root: &Path, args: &[String]) -> Result<String> {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        run_git(root, &args, None)
+    }
+
+    pub fn remotes(&self) -> Result<Vec<String>> {
+        Ok(self
+            .git(&["remote"], None)?
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
+    pub fn tags(&self) -> Result<Vec<TagInfo>> {
+        let out = self.git(
+            &[
+                "for-each-ref",
+                "refs/tags",
+                "--sort=-creatordate",
+                "--format=%(refname:short)%00%(objectname:short)%00%(subject)%00%(creatordate:unix)",
+            ],
+            None,
+        )?;
+        Ok(out
+            .lines()
+            .filter_map(|l| {
+                let mut f = l.split('\0');
+                Some(TagInfo {
+                    name: f.next()?.to_string(),
+                    short_sha: f.next().unwrap_or_default().to_string(),
+                    summary: f.next().unwrap_or_default().to_string(),
+                    time: f.next().and_then(|t| t.parse().ok()).unwrap_or(0),
+                })
+            })
+            .filter(|t| !t.name.is_empty())
+            .collect())
+    }
+
+    pub fn stashes(&self) -> Result<Vec<StashInfo>> {
+        let out = self.git(&["stash", "list", "--format=%gd%x00%gs%x00%ct"], None)?;
+        Ok(out
+            .lines()
+            .filter_map(|l| {
+                let mut f = l.split('\0');
+                Some(StashInfo {
+                    reference: f.next()?.to_string(),
+                    message: f.next().unwrap_or_default().to_string(),
+                    time: f.next().and_then(|t| t.parse().ok()).unwrap_or(0),
+                })
+            })
+            .collect())
+    }
+
+    /// Checks out `name`, creating it from `start` (or HEAD) when no local
+    /// branch has that name. A remote branch of the same name is tracked.
+    pub fn checkout_or_create(&self, name: &str, start: Option<&str>) -> Result<()> {
+        let name = name.trim();
+        if name.is_empty() {
+            bail!("Enter a branch name.");
+        }
+        if self.repo.find_branch(name, git2::BranchType::Local).is_ok() {
+            return self.git(&["switch", name], None).map(drop);
+        }
+        self.git(&["check-ref-format", "--branch", name], None)
+            .map_err(|_| anyhow!("'{name}' is not a valid branch name."))?;
+        match start {
+            Some(start) => self.git(&["switch", "-c", name, start], None).map(drop),
+            // `git switch <name>` tracks a remote branch of that name when there is one.
+            None if self.remote_branch_named(name) => self.git(&["switch", name], None).map(drop),
+            None => self.git(&["switch", "-c", name], None).map(drop),
+        }
+    }
+
+    fn remote_branch_named(&self, name: &str) -> bool {
+        self.remotes().unwrap_or_default().iter().any(|r| {
+            self.repo
+                .find_branch(&format!("{r}/{name}"), git2::BranchType::Remote)
+                .is_ok()
+        })
+    }
+
+    /// Undoes the last commit, keeping its changes staged. Returns its message.
+    pub fn undo_last_commit(&self) -> Result<String> {
+        let head = self
+            .repo
+            .head()
+            .ok()
+            .and_then(|h| h.peel_to_commit().ok())
+            .ok_or_else(|| anyhow!("There is no commit to undo."))?;
+        let message = head.message().unwrap_or_default().trim_end().to_string();
+        if head.parent_count() == 0 {
+            self.git(&["update-ref", "-d", "HEAD"], None)?;
+        } else {
+            self.git(&["reset", "--soft", "HEAD~1"], None)?;
+        }
+        Ok(message)
+    }
+
+    /// Appends `pattern` to the root .gitignore, on its own line.
+    pub fn add_to_gitignore(&self, pattern: &str) -> Result<()> {
+        let path = self.root.join(".gitignore");
+        let mut text = std::fs::read_to_string(&path).unwrap_or_default();
+        if text.lines().any(|l| l.trim() == pattern) {
+            return Ok(());
+        }
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(pattern);
+        text.push('\n');
+        std::fs::write(path, text)?;
+        Ok(())
     }
 
     /// Pushes the current branch. A branch without an upstream is published to
@@ -770,6 +933,71 @@ mod tests {
         let topic = branches.iter().find(|b| b.name == "origin/topic").unwrap();
         repo.switch_branch(topic).unwrap();
         assert_eq!(repo.head_info(false).branch, "topic");
+    }
+
+    #[test]
+    fn checkout_creates_a_missing_branch() {
+        let f = Fixture::new("checkout-create");
+        let remote = f.dir.join("remote.git");
+        f.git(&["init", "-q", "--bare", remote.to_str().unwrap()]);
+        f.git(&["remote", "add", "origin", remote.to_str().unwrap()]);
+        f.git(&["push", "-q", "origin", "main:topic"]);
+        f.git(&["fetch", "-q"]);
+        let repo = f.repo();
+        // A new name creates a local branch from HEAD.
+        repo.checkout_or_create("feature/new", None).unwrap();
+        assert_eq!(repo.head_info(false).branch, "feature/new");
+        // An existing local branch is checked out, not recreated.
+        repo.checkout_or_create("main", None).unwrap();
+        assert_eq!(repo.head_info(false).branch, "main");
+        // A name that exists only on the remote tracks it.
+        repo.checkout_or_create("topic", None).unwrap();
+        let info = repo.head_info(false);
+        assert_eq!(info.branch, "topic");
+        assert!(info.has_upstream);
+        assert!(repo.checkout_or_create("bad name..", None).is_err());
+    }
+
+    #[test]
+    fn lists_tags_and_stashes_and_undoes_commits() {
+        let f = Fixture::new("tags-stashes");
+        let repo = f.repo();
+        f.git(&["tag", "-a", "v1.0", "-m", "First release"]);
+        let tags = repo.tags().unwrap();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].name, "v1.0");
+        assert_eq!(tags[0].summary, "First release");
+
+        f.write("a.txt", "stashed\n");
+        f.git(&["stash", "push", "-q", "-m", "wip on a"]);
+        let stashes = repo.stashes().unwrap();
+        assert_eq!(stashes.len(), 1);
+        assert_eq!(stashes[0].reference, "stash@{0}");
+        assert!(stashes[0].message.contains("wip on a"));
+
+        f.write("a.txt", "second\n");
+        repo.stage(&["a.txt".into()]).unwrap();
+        repo.commit_with(
+            "Second",
+            CommitOptions {
+                signoff: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(repo
+            .last_commit_message()
+            .unwrap()
+            .contains("Signed-off-by:"));
+        let message = repo.undo_last_commit().unwrap();
+        assert!(message.starts_with("Second"));
+        let (staged, _) = repo.status().unwrap();
+        assert_eq!(staged.len(), 1);
+
+        repo.add_to_gitignore("/build").unwrap();
+        repo.add_to_gitignore("/build").unwrap();
+        let ignore = std::fs::read_to_string(f.dir.join(".gitignore")).unwrap();
+        assert_eq!(ignore.matches("/build").count(), 1);
     }
 
     #[test]

@@ -85,7 +85,7 @@ impl Workspace {
                     Animation::new(Duration::from_millis(900)).repeat(),
                     |svg, delta| {
                         // Counter-clockwise, matching the arrows in the icon.
-                        svg.with_transformation(Transformation::rotate(percentage(-delta)))
+                        svg.with_transformation(Transformation::rotate(percentage(1.0 - delta)))
                     },
                 )
                 .into_any_element()
@@ -132,7 +132,7 @@ impl Workspace {
         bar = bar.child(div().flex_1());
 
         if let Some(diff) = self.diff() {
-            if let Some(CursorLine::New(line)) = diff.cursor {
+            if let (true, Some(CursorLine::New(line))) = (self.show_blame, diff.cursor) {
                 if let Some(b) = diff.blame.as_ref().and_then(|b| b.line(line)) {
                     bar = bar.child(
                         item("sb-blame")

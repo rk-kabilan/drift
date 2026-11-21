@@ -37,7 +37,9 @@ static ICONS: &[(&str, &[u8])] = icons![
     "search",
     "split",
     "sun",
+    "stash",
     "sync",
+    "tag",
 ];
 
 pub struct Assets;
