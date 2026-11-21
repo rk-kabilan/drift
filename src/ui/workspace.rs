@@ -11,7 +11,7 @@ use gpui::{
 };
 
 use crate::diff::{FileDiff, Layout, Row};
-use crate::git::{Blame, BranchInfo, ChangeKind, FileChange, HeadInfo, Repo};
+use crate::git::{Blame, BranchInfo, ChangeKind, FileChange, HeadInfo, Repo, TagInfo};
 use crate::syntax::Lang;
 use crate::theme::{ActiveTheme as _, Appearance, Theme, ThemeState};
 use crate::ui::picker::{Picker, PickerEvent, PickerItem};
@@ -28,6 +28,7 @@ actions!(
         ToggleLayout,
         ToggleTheme,
         QuickOpen,
+        CommandPalette,
         SwitchBranch,
         CloseTab,
         NextTab,
@@ -48,6 +49,8 @@ pub fn actions_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("f7", NextChange, None),
         KeyBinding::new("shift-f7", PreviousChange, None),
         KeyBinding::new("secondary-p", QuickOpen, None),
+        KeyBinding::new("secondary-shift-p", CommandPalette, None),
+        KeyBinding::new("f1", CommandPalette, None),
         KeyBinding::new("secondary-shift-b", SwitchBranch, None),
         KeyBinding::new("secondary-w", CloseTab, None),
         KeyBinding::new("ctrl-tab", NextTab, None),
@@ -99,9 +102,34 @@ pub enum MergeDirection {
     ToLeft,
 }
 
-pub enum PickerKind {
-    Files(Vec<(bool, String)>),
-    Branches(Vec<BranchInfo>),
+/// What the user chose in a picker.
+pub enum Pick {
+    Item(usize),
+    Text(String),
+}
+
+/// Runs when a picker is confirmed. The picker is already closed, so the
+/// callback may open the next one.
+pub type OnPick = Box<dyn FnOnce(&mut Workspace, Pick, &mut Window, &mut Context<Workspace>)>;
+
+/// A ref chosen in [`Workspace::pick_ref`].
+pub enum RefChoice {
+    Branch(BranchInfo),
+    Tag(TagInfo),
+    /// A name that matches no branch, typed into the box.
+    New(String),
+}
+
+/// Which refs [`Workspace::pick_ref`] lists.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RefFilter {
+    pub local: bool,
+    pub remote: bool,
+    pub tags: bool,
+    /// Lists the checked-out branch too.
+    pub head: bool,
+    /// Offers to create a branch with the typed name.
+    pub create: bool,
 }
 
 pub struct DiffState {
@@ -147,7 +175,12 @@ pub struct Workspace {
     pub(super) busy: Option<String>,
     /// A short note shown in the status bar after an operation finishes.
     pub(super) status_note: Option<&'static str>,
-    pub(super) picker: Option<(PickerKind, Entity<Picker>)>,
+    pub(super) picker: Option<Entity<Picker>>,
+    on_pick: Option<OnPick>,
+    /// The open picker is Cmd+P, which switches to commands on ">".
+    picker_is_files: bool,
+    pub(super) recent_commands: Vec<super::commands::Cmd>,
+    pub(super) show_blame: bool,
     focus_handle: FocusHandle,
     _picker_subscription: Option<gpui::Subscription>,
     _tasks: Vec<gpui::Task<()>>,
@@ -221,6 +254,10 @@ impl Workspace {
             busy: None,
             status_note: None,
             picker: None,
+            on_pick: None,
+            picker_is_files: false,
+            recent_commands: Vec::new(),
+            show_blame: true,
             focus_handle: cx.focus_handle(),
             _picker_subscription: None,
             _tasks: vec![poll],
@@ -577,7 +614,7 @@ impl Workspace {
 
     // ---- git operations ----
 
-    fn run(
+    pub(super) fn run(
         &mut self,
         cx: &mut Context<Self>,
         op: impl FnOnce(&Repo) -> anyhow::Result<()>,
@@ -743,7 +780,7 @@ impl Workspace {
     }
 
     /// Shows a short status message ("Pushed") for a couple of seconds.
-    fn flash(&mut self, text: &'static str, cx: &mut Context<Self>) {
+    pub(super) fn flash(&mut self, text: &'static str, cx: &mut Context<Self>) {
         self.status_note = Some(text);
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -765,15 +802,53 @@ impl Workspace {
         if self.repo.is_none() {
             return;
         }
+        let keys: Vec<(bool, String)> = self
+            .unstaged
+            .iter()
+            .chain(&self.staged)
+            .map(|c| (c.staged, c.path.clone()))
+            .collect();
+        let items = self.change_items(true, true, cx);
+        let picker = cx.new(|cx| {
+            Picker::new(
+                "Search changed files by name (type > for commands)",
+                "No changed files match.",
+                items,
+                cx,
+            )
+        });
+        self.show_picker(
+            picker,
+            Box::new(move |this, pick, _, cx| {
+                if let Pick::Item(ix) = pick {
+                    if let Some((staged, path)) = keys.get(ix).cloned() {
+                        this.open(staged, path, true, cx);
+                    }
+                }
+            }),
+            window,
+            cx,
+        );
+        self.picker_is_files = true;
+    }
+
+    /// Picker rows for changed files, under "Changes" and "Staged Changes".
+    pub(super) fn change_items(
+        &self,
+        unstaged: bool,
+        staged: bool,
+        cx: &mut Context<Self>,
+    ) -> Vec<PickerItem> {
         let t = cx.theme().clone();
-        let mut keys = Vec::new();
         let mut items = Vec::new();
-        for (section, list) in [
-            ("Changes", &self.unstaged),
-            ("Staged Changes", &self.staged),
+        for (section, list, on) in [
+            ("Changes", &self.unstaged, unstaged),
+            ("Staged Changes", &self.staged, staged),
         ] {
+            if !on {
+                continue;
+            }
             for c in list.iter() {
-                keys.push((c.staged, c.path.clone()));
                 items.push(PickerItem {
                     haystack: c.path.clone(),
                     label_start: c.path.len() - c.file_name().len(),
@@ -788,29 +863,91 @@ impl Workspace {
                 });
             }
         }
-        let picker = cx.new(|cx| {
-            Picker::new(
-                "Search changed files by name",
-                "No changed files match.",
-                items,
-                cx,
-            )
-        });
-        self.show_picker(PickerKind::Files(keys), picker, window, cx);
+        items
     }
 
+    /// The branch list from the status bar and Cmd+Shift+B: check out a branch
+    /// or tag, or type a new name to create a branch from HEAD.
     pub fn open_branch_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.checkout_picker(window, cx);
+    }
+
+    pub(super) fn checkout_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.pick_ref(
+            "Select a branch or tag to check out, or type a new branch name",
+            RefFilter {
+                local: true,
+                remote: true,
+                tags: true,
+                head: true,
+                create: true,
+            },
+            |this, choice, _, cx| match choice {
+                RefChoice::Branch(b) if b.is_head => {}
+                RefChoice::Branch(b) => {
+                    this.run(cx, |r| r.switch_branch(&b));
+                }
+                RefChoice::Tag(t) => {
+                    this.git(&["switch", "--detach", &t.name], "Checked out tag", cx);
+                }
+                RefChoice::New(name) => {
+                    if this.run(cx, |r| r.checkout_or_create(&name, None)) {
+                        this.flash("Switched branch", cx);
+                    }
+                }
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Lists branches and tags, and calls `then` with the one chosen.
+    pub(super) fn pick_ref(
+        &mut self,
+        placeholder: &'static str,
+        filter: RefFilter,
+        then: impl FnOnce(&mut Self, RefChoice, &mut Window, &mut Context<Self>) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(repo) = &self.repo else { return };
-        let branches = match repo.branches() {
-            Ok(b) => b,
+        let loaded = repo.branches().and_then(|b| {
+            let tags = if filter.tags { repo.tags()? } else { vec![] };
+            Ok((b, tags))
+        });
+        let (branches, tags) = match loaded {
+            Ok(v) => v,
             Err(e) => {
                 self.error = Some(format!("{e:#}"));
                 cx.notify();
                 return;
             }
         };
+        let branches: Vec<BranchInfo> = branches
+            .into_iter()
+            .filter(|b| {
+                if b.remote {
+                    filter.remote
+                } else {
+                    filter.local
+                }
+            })
+            .filter(|b| filter.head || !b.is_head)
+            .collect();
+        // Names that already exist, so typing one doesn't offer to create it.
+        let mut exact: Vec<String> = Vec::new();
+        for b in &branches {
+            exact.push(b.name.clone());
+            if b.remote {
+                if let Some((_, rest)) = b.name.split_once('/') {
+                    exact.push(rest.to_string());
+                }
+            }
+        }
+        exact.extend(tags.iter().map(|t| t.name.clone()));
+
         let t = cx.theme().clone();
-        let items = branches
+        let mut items: Vec<PickerItem> = branches
             .iter()
             .map(|b| {
                 let age = crate::git::relative_time_since(b.time);
@@ -840,21 +977,111 @@ impl Workspace {
                 }
             })
             .collect();
+        items.extend(tags.iter().map(|tag| {
+            let mut note = format!(
+                "{} · {}",
+                tag.short_sha,
+                crate::git::relative_time_since(tag.time)
+            );
+            if !tag.summary.is_empty() {
+                note = format!("{note} · {}", tag.summary);
+            }
+            PickerItem {
+                haystack: tag.name.clone(),
+                label_start: 0,
+                note,
+                icon: "tag",
+                icon_color: Some(t.st_modified),
+                badge: None,
+                section: Some("Tags"),
+            }
+        }));
+        let create = filter.create;
         let picker = cx.new(|cx| {
-            Picker::new(
-                "Select a branch to check out",
-                "No branches match.",
-                items,
-                cx,
-            )
+            let p = Picker::new(placeholder, "No branches match.", items, cx);
+            if create {
+                p.with_create(|q| format!("Create new branch '{q}'"), exact, cx)
+            } else {
+                p
+            }
         });
-        self.show_picker(PickerKind::Branches(branches), picker, window, cx);
+        let count = branches.len();
+        self.show_picker(
+            picker,
+            Box::new(move |this, pick, window, cx| {
+                let choice = match pick {
+                    Pick::Item(ix) if ix < count => RefChoice::Branch(branches[ix].clone()),
+                    Pick::Item(ix) => match tags.get(ix - count) {
+                        Some(tag) => RefChoice::Tag(tag.clone()),
+                        None => return,
+                    },
+                    Pick::Text(name) => RefChoice::New(name),
+                };
+                then(this, choice, window, cx)
+            }),
+            window,
+            cx,
+        );
     }
 
-    fn show_picker(
+    /// Shows `items` and calls `then` with the index chosen.
+    pub(super) fn pick_list(
         &mut self,
-        kind: PickerKind,
+        placeholder: impl Into<gpui::SharedString>,
+        empty_text: impl Into<gpui::SharedString>,
+        items: Vec<PickerItem>,
+        then: impl FnOnce(&mut Self, usize, &mut Window, &mut Context<Self>) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let picker = cx.new(|cx| Picker::new(placeholder, empty_text, items, cx));
+        self.show_picker(
+            picker,
+            Box::new(move |this, pick, window, cx| {
+                if let Pick::Item(ix) = pick {
+                    then(this, ix, window, cx)
+                }
+            }),
+            window,
+            cx,
+        );
+    }
+
+    /// Asks for a line of text, like VS Code's input box.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn ask_text(
+        &mut self,
+        placeholder: impl Into<gpui::SharedString>,
+        hint: impl Into<String>,
+        allow_empty: bool,
+        initial: Option<String>,
+        then: impl FnOnce(&mut Self, String, &mut Window, &mut Context<Self>) + 'static,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let picker = cx.new(|cx| {
+            let mut p = Picker::prompt(placeholder, hint, allow_empty, cx);
+            if let Some(text) = initial {
+                p.set_query(text, cx);
+            }
+            p
+        });
+        self.show_picker(
+            picker,
+            Box::new(move |this, pick, window, cx| {
+                if let Pick::Text(text) = pick {
+                    then(this, text, window, cx)
+                }
+            }),
+            window,
+            cx,
+        );
+    }
+
+    pub(super) fn show_picker(
+        &mut self,
         picker: Entity<Picker>,
+        on_pick: OnPick,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -863,33 +1090,34 @@ impl Workspace {
             &picker,
             window,
             |this, _, event: &PickerEvent, window, cx| {
-                match event {
-                    PickerEvent::Dismiss => {}
-                    PickerEvent::Confirm(ix) => match this.picker.as_ref().map(|p| &p.0) {
-                        Some(PickerKind::Files(keys)) => {
-                            if let Some((staged, path)) = keys.get(*ix).cloned() {
-                                this.open(staged, path, true, cx);
-                            }
+                let pick = match event {
+                    PickerEvent::QueryChanged(query) => {
+                        if this.picker_is_files && query.starts_with('>') {
+                            let query = query.clone();
+                            this.open_command_palette(Some(query), window, cx);
                         }
-                        Some(PickerKind::Branches(branches)) => {
-                            if let Some(b) = branches.get(*ix).cloned() {
-                                if !b.is_head {
-                                    this.run(cx, |r| r.switch_branch(&b));
-                                }
-                            }
-                        }
-                        None => {}
-                    },
-                }
+                        return;
+                    }
+                    PickerEvent::Dismiss => None,
+                    PickerEvent::Confirm(ix) => Some(Pick::Item(*ix)),
+                    PickerEvent::Text(text) => Some(Pick::Text(text.clone())),
+                };
+                let on_pick = this.on_pick.take();
                 this.close_picker(window, cx);
+                if let (Some(pick), Some(on_pick)) = (pick, on_pick) {
+                    on_pick(this, pick, window, cx);
+                }
             },
         ));
         window.focus(&picker.focus_handle(cx));
-        self.picker = Some((kind, picker));
+        self.picker = Some(picker);
+        self.on_pick = Some(on_pick);
+        self.picker_is_files = false;
         cx.notify();
     }
 
     pub fn close_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.on_pick = None;
         if self.picker.take().is_some() {
             self._picker_subscription = None;
             window.focus(&self.message.focus_handle(cx));
@@ -1102,6 +1330,9 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|this, _: &QuickOpen, window, cx| this.open_file_picker(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &CommandPalette, window, cx| {
+                this.open_command_palette(None, window, cx)
+            }))
             .on_action(
                 cx.listener(|this, _: &SwitchBranch, window, cx| {
                     this.open_branch_picker(window, cx)
@@ -1142,7 +1373,7 @@ impl Render for Workspace {
             .when(!show_title_bar, |d| d.pt(px(6.)))
             .child(body)
             .child(self.render_status_bar(window, cx))
-            .children(self.picker.as_ref().map(|(_, picker)| {
+            .children(self.picker.as_ref().map(|picker| {
                 // Click outside the picker to close it.
                 div()
                     .id("picker-backdrop")

@@ -1,3 +1,4 @@
+mod commands;
 mod diff_pane;
 pub mod picker;
 pub mod prompt;

@@ -6,4 +6,4 @@ mod blame;
 mod repo;
 
 pub use blame::{relative_time_since, Blame};
-pub use repo::{BranchInfo, ChangeKind, FileChange, HeadInfo, Repo};
+pub use repo::{BranchInfo, ChangeKind, CommitOptions, FileChange, HeadInfo, Repo, TagInfo};

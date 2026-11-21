@@ -148,6 +148,12 @@ impl Workspace {
                                     true,
                                     |this, window, cx| this.open_file_picker(window, cx),
                                 ),
+                                MenuItem::new(
+                                    "mi-commands",
+                                    "All Git Commands…",
+                                    true,
+                                    |this, window, cx| this.open_command_palette(None, window, cx),
+                                ),
                             ],
                             cx,
                         ))
