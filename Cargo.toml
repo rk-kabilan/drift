@@ -1,0 +1,30 @@
+[package]
+name = "drift"
+version = "0.1.0"
+edition = "2021"
+description = "A fast, git-only desktop client built with Rust and GPUI"
+license = "MIT"
+
+[dependencies]
+gpui = "0.2.2"
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
+similar = "2"
+anyhow = "1"
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
+log = "0.4"
+unicode-segmentation = "1"
+
+# On macOS, compile GPUI's Metal shaders when the app starts instead of at build
+# time, so building needs only the Xcode command line tools, not full Xcode.
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+
+# xattr 0.2.3 (pulled in by gpui's http client) refers to libc::ENOATTR, which
+# newer libc releases no longer define on Linux. The local copy maps it to ENODATA.
+[patch.crates-io]
+xattr = { path = "patches/xattr" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
