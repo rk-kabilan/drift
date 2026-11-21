@@ -1,11 +1,11 @@
 // Windows resources for drift.exe: the app icon shown in Explorer, the taskbar and Alt+Tab.
-// Paths are relative to the crate root, where build.rs runs the resource compiler.
-1 ICON "assets/app-icon/windows/drift.ico"
+// A template: build.rs fills in the icon path and the version from Cargo.toml.
+1 ICON "@ICON@"
 
 // The name Windows shows for drift.exe (Task Manager, file properties, "Open with").
 1 VERSIONINFO
-FILEVERSION 0,1,0,0
-PRODUCTVERSION 0,1,0,0
+FILEVERSION @VERSION_COMMAS@
+PRODUCTVERSION @VERSION_COMMAS@
 FILEOS 0x40004
 FILETYPE 0x1
 BEGIN
@@ -18,8 +18,8 @@ BEGIN
       VALUE "ProductName", "Drift"
       VALUE "InternalName", "drift"
       VALUE "OriginalFilename", "drift.exe"
-      VALUE "FileVersion", "0.1.0"
-      VALUE "ProductVersion", "0.1.0"
+      VALUE "FileVersion", "@VERSION@"
+      VALUE "ProductVersion", "@VERSION@"
     END
   END
   BLOCK "VarFileInfo"

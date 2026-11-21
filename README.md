@@ -52,6 +52,21 @@ One command per platform builds a release and packages it into `target/release/<
 
 The macOS app is signed ad hoc, which runs on your own Mac. To share builds without warnings, sign and notarize the app with an Apple Developer ID, and sign the Windows exe and installer with `signtool`.
 
+### Releasing
+
+`.github/workflows/release.yml` builds every package on GitHub's macOS, Windows and Linux machines and publishes them as a GitHub Release. To release, set `version` in `Cargo.toml`, commit, and push a matching tag:
+
+```sh
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+The workflow stops if the tag and `Cargo.toml` disagree. Running it by hand from the Actions tab builds the packages as downloadable artifacts without publishing anything.
+
+### Updates
+
+Once a day Drift checks the repository's latest GitHub Release (with the system's `curl`, so the app carries no HTTP code). When a newer version exists, the status bar and the welcome screen show "Drift x.y.z available", linking to the download page. "Check for Updates…" in the command palette checks right away. Installing the new package replaces the old version; settings and recent repositories are kept. Debug builds don't check unless `DRIFT_UPDATE_CHECK=1`, and `DRIFT_UPDATE_CHECK=0` turns the check off. Release downloads must be public for this to work.
+
 ### App icon
 
 The icon lives in `assets/app-icon/` (`drift.svg` is the master; `drift-macos.svg` is the macOS version on Apple's icon grid). `build.rs` embeds `windows/drift.ico` and the "Drift" product name into `drift.exe`; the macOS script puts `macos/drift.icns` in the app; the Linux packages install the hicolor icons and `drift.desktop`, whose name matches the window's app id (`drift`).
@@ -80,6 +95,8 @@ The icon lives in `assets/app-icon/` (`drift.svg` is the master; `drift-macos.sv
 | `assets/icons/` | SVG icons, compiled into the binary |
 | `assets/app-icon/` | App icon for macOS (`.icns`), Windows (`.ico`, embedded by `build.rs`) and Linux (hicolor PNGs, SVG, `.desktop`) |
 | `scripts/` | Packaging scripts for macOS, Linux and Windows |
+| `src/update.rs` | Daily check for a newer release |
+| `.github/workflows/release.yml` | Builds and publishes a release when a `v*` tag is pushed |
 | `patches/xattr` | Local copy of `xattr` 0.2.3 (pulled in by GPUI) fixed for current `libc` on Linux |
 
 Run the tests with `cargo test`.

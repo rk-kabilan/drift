@@ -162,6 +162,16 @@ impl Workspace {
             }
             bar = bar.child(item("sb-lang").child(Lang::name_for_path(&diff.change.path)));
         }
+        if let Some(update) = cx.global::<crate::update::Available>().0.clone() {
+            bar = bar.child(
+                item("sb-update")
+                    .cursor_pointer()
+                    .child(icon_sized("arrow-down", 14., fg))
+                    .child(format!("Drift {} available", update.version))
+                    .tooltip(tooltip("Open the download page"))
+                    .on_click(move |_, _, cx| cx.open_url(&update.url)),
+            );
+        }
         let theme_icon = if t.appearance == Appearance::Dark {
             "sun"
         } else {

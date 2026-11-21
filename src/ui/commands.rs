@@ -30,6 +30,7 @@ commands! {
     ApplyStash => "Apply Stash...",
     Checkout => "Checkout to...",
     CheckoutDetached => "Checkout to (Detached)...",
+    CheckForUpdates => "Check for Updates...",
     CherryPick => "Cherry Pick...",
     Clone => "Clone...",
     CloseRepository => "Close Repository",
@@ -105,7 +106,12 @@ impl Cmd {
     fn needs_repo(self) -> bool {
         !matches!(
             self,
-            Cmd::Clone | Cmd::Init | Cmd::NewWindow | Cmd::OpenRecent | Cmd::OpenRepository
+            Cmd::CheckForUpdates
+                | Cmd::Clone
+                | Cmd::Init
+                | Cmd::NewWindow
+                | Cmd::OpenRecent
+                | Cmd::OpenRepository
         )
     }
 }
@@ -204,6 +210,7 @@ impl Workspace {
             Cmd::Init => self.new_repo_dialog(window, cx),
             Cmd::CloseRepository => self.close_repo(window, cx),
             Cmd::NewWindow => self.new_window(window, cx),
+            Cmd::CheckForUpdates => self.check_for_updates(window, cx),
 
             // ---- commit ----
             Cmd::Commit => self.commit_cmd(Scope::Smart, no_opts, window, cx),

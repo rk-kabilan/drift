@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 
 const MAX: usize = 10;
 
-fn file() -> Option<PathBuf> {
+/// Drift's per-user state folder (see the module docs).
+pub fn state_dir() -> Option<PathBuf> {
     let home = || std::env::var_os("HOME").map(PathBuf::from);
     let dir = if cfg!(target_os = "macos") {
         home().map(|h| h.join("Library/Application Support"))
@@ -20,7 +21,11 @@ fn file() -> Option<PathBuf> {
             .filter(|p| p.is_absolute())
             .or_else(|| home().map(|h| h.join(".local/state")))
     }?;
-    Some(dir.join("drift").join("recent-repositories"))
+    Some(dir.join("drift"))
+}
+
+fn file() -> Option<PathBuf> {
+    state_dir().map(|d| d.join("recent-repositories"))
 }
 
 /// Recent repositories, newest first. Folders that no longer exist are left out.

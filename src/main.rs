@@ -12,6 +12,7 @@ mod recent;
 mod syntax;
 mod theme;
 mod ui;
+mod update;
 
 use std::path::PathBuf;
 
@@ -73,6 +74,7 @@ fn main() {
             cx.bind_keys(ui::text_input::key_bindings());
             cx.bind_keys(ui::actions_bindings());
 
+            update::start(cx);
             ui::open_window(start, None, cx);
             cx.on_window_closed(|cx| {
                 if cx.windows().is_empty() {

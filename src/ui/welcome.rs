@@ -256,6 +256,60 @@ impl Workspace {
         .detach();
     }
 
+    /// Checks for a newer release now and says what it found.
+    pub fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |this, cx| {
+            let found = cx
+                .background_executor()
+                .spawn(async { crate::update::check() })
+                .await;
+            this.update_in(cx, |_, window, cx| {
+                let current = env!("CARGO_PKG_VERSION");
+                match found {
+                    Ok(Some(update)) => {
+                        crate::update::publish(Some(update.clone()), cx);
+                        let answer = window.prompt(
+                            PromptLevel::Info,
+                            &format!("Drift {} is available", update.version),
+                            Some(&format!("You have {current}. Download the new version?")),
+                            &["Download", "Later"],
+                            cx,
+                        );
+                        cx.spawn(async move |_, cx| {
+                            if matches!(answer.await, Ok(0)) {
+                                cx.update(|cx| cx.open_url(&update.url)).ok();
+                            }
+                        })
+                        .detach();
+                    }
+                    Ok(None) => {
+                        crate::update::publish(None, cx);
+                        // Only one button, so the answer isn't needed.
+                        drop(window.prompt(
+                            PromptLevel::Info,
+                            "Drift is up to date",
+                            Some(&format!("You have the latest version, {current}.")),
+                            &["OK"],
+                            cx,
+                        ));
+                    }
+                    Err(()) => {
+                        // Only one button, so the answer isn't needed.
+                        drop(window.prompt(
+                            PromptLevel::Warning,
+                            "Couldn't check for updates",
+                            Some("The releases page couldn't be reached. Check your connection and try again."),
+                            &["OK"],
+                            cx,
+                        ));
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Lists recent repositories in a picker (the command palette's "Open Recent").
     pub fn open_recent_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.recent = recent::load();
@@ -429,6 +483,34 @@ impl Workspace {
                             ),
                     ),
             )
+            .children(cx.global::<crate::update::Available>().0.clone().map(|u| {
+                div()
+                    .id("welcome-update")
+                    .mt(px(12.))
+                    .px(px(10.))
+                    .py(px(6.))
+                    .rounded(px(4.))
+                    .border_1()
+                    .border_color(t.accent.opacity(0.5))
+                    .bg(t.accent.opacity(0.08))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(icon_sized("arrow-down", 14., t.accent))
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(format!("Drift {} is available.", u.version)),
+                    )
+                    .child(
+                        div()
+                            .text_color(t.accent)
+                            .cursor_pointer()
+                            .hover(|s| s.underline())
+                            .child("Download"),
+                    )
+                    .on_click(move |_, _, cx| cx.open_url(&u.url))
+            }))
             .children(self.welcome_error.clone().map(|e| {
                 div()
                     .mt(px(12.))
