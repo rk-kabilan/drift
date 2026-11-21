@@ -2,14 +2,29 @@
 #
 # To release: set `version` in Cargo.toml (e.g. 1.0.0), commit, then push a
 # matching tag:  git tag v1.0.0 && git push origin v1.0.0
-# Running the workflow by hand (Actions → Release → Run workflow) builds the
-# packages as downloadable artifacts without publishing a release.
+# Running the workflow by hand (Actions → Release → Run workflow) publishes the
+# Cargo.toml version too, tagging the chosen commit as v<version>; untick
+# "Publish" to only build the packages as downloadable artifacts.
+#
+# Order: version check and tests first; the three packages build only if the
+# tests pass, and the release is published once all three are built.
+#
+# Build speed: almost all the time goes into compiling dependencies (GPUI),
+# which rust-cache keeps between runs. The first run on a new Cargo.lock or
+# Rust version builds them from scratch (10-15 min on Linux and Windows); later
+# runs only rebuild Drift itself (a few minutes). Caches saved by runs on the
+# default branch are also used by tag runs.
 name: Release
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish a GitHub Release for the Cargo.toml version"
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -21,20 +36,39 @@ jobs:
   version:
     name: Check version
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
       - name: Tag matches Cargo.toml
-        if: startsWith(github.ref, 'refs/tags/')
+        id: tag
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "v$version" != "$GITHUB_REF_NAME" ]; then
             echo "::error::Tag $GITHUB_REF_NAME doesn't match Cargo.toml version $version"
             exit 1
           fi
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+  test:
+    name: Test
+    needs: version
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install build libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            libvulkan-dev libx11-xcb-dev libxcb1-dev libfontconfig-dev pkg-config clang
+      - name: Test
+        run: cargo test
 
   linux:
     name: Linux
-    needs: version
+    needs: test
     # The oldest supported Ubuntu, so the binary runs on older glibc too.
     runs-on: ubuntu-22.04
     steps:
@@ -49,8 +83,6 @@ jobs:
           sudo curl -fsSL -o /usr/local/bin/appimagetool \
             https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           sudo chmod +x /usr/local/bin/appimagetool
-      - name: Test
-        run: cargo test
       - name: Package
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
@@ -64,7 +96,7 @@ jobs:
 
   macos:
     name: macOS
-    needs: version
+    needs: test
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -82,7 +114,7 @@ jobs:
 
   windows:
     name: Windows
-    needs: version
+    needs: test
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -101,8 +133,9 @@ jobs:
 
   release:
     name: Publish release
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: [linux, macos, windows]
+    # A tag push always publishes; a manual run publishes unless "Publish" is unticked.
+    if: github.ref_type == 'tag' || inputs.publish
+    needs: [version, linux, macos, windows]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -112,8 +145,15 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
         run: |
-          gh release create "$GITHUB_REF_NAME" dist/* \
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::error::Release $TAG already exists. Raise the version in Cargo.toml, or delete that release first."
+            exit 1
+          fi
+          # --target creates the tag on this commit when it doesn't exist yet.
+          gh release create "$TAG" dist/* \
             --repo "$GITHUB_REPOSITORY" \
-            --title "Drift ${GITHUB_REF_NAME#v}" \
+            --target "$GITHUB_SHA" \
+            --title "Drift ${TAG#v}" \
             --generate-notes
