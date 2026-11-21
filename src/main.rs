@@ -2,7 +2,9 @@
 
 mod assets;
 mod diff;
+mod fuzzy;
 mod git;
+mod merge;
 mod syntax;
 mod theme;
 mod ui;

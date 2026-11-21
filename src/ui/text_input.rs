@@ -31,6 +31,7 @@ actions!(
         Home,
         End,
         Newline,
+        Cancel,
         Paste,
         Cut,
         Copy,
@@ -43,6 +44,13 @@ pub const MAX_LINES: usize = 10;
 
 pub enum TextInputEvent {
     Changed,
+    /// Enter in a single-line input.
+    Submit,
+    /// Up / Down in a single-line input (used to move through a list).
+    MoveUp,
+    MoveDown,
+    /// Escape.
+    Cancel,
 }
 
 impl EventEmitter<TextInputEvent> for TextInput {}
@@ -57,6 +65,7 @@ pub struct TextInput {
     layout: Option<InputLayout>,
     visual_lines: usize,
     is_selecting: bool,
+    single_line: bool,
 }
 
 /// Shaped text from the last paint, used for hit testing and IME.
@@ -118,6 +127,17 @@ impl TextInput {
             layout: None,
             visual_lines: MIN_LINES,
             is_selecting: false,
+            single_line: false,
+        }
+    }
+
+    /// A one-line input: Enter submits, Up/Down are reported to the owner and
+    /// text does not wrap.
+    pub fn single_line(placeholder: impl Into<SharedString>, cx: &mut Context<Self>) -> Self {
+        Self {
+            single_line: true,
+            visual_lines: 1,
+            ..Self::new(placeholder, cx)
         }
     }
 
@@ -174,10 +194,18 @@ impl TextInput {
     }
 
     fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        if self.single_line {
+            cx.emit(TextInputEvent::MoveUp);
+            return;
+        }
         self.move_to(self.vertical_target(-1.), cx);
     }
 
     fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        if self.single_line {
+            cx.emit(TextInputEvent::MoveDown);
+            return;
+        }
         self.move_to(self.vertical_target(1.), cx);
     }
 
@@ -218,7 +246,15 @@ impl TextInput {
     }
 
     fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
+        if self.single_line {
+            cx.emit(TextInputEvent::Submit);
+            return;
+        }
         self.replace_text_in_range(None, "\n", window, cx);
+    }
+
+    fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(TextInputEvent::Cancel);
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -272,7 +308,13 @@ impl TextInput {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.replace_text_in_range(None, &text.replace("\r\n", "\n"), window, cx);
+            let text = text.replace("\r\n", "\n");
+            let text = if self.single_line {
+                text.replace('\n', " ")
+            } else {
+                text
+            };
+            self.replace_text_in_range(None, &text, window, cx);
         }
     }
 
@@ -528,7 +570,12 @@ impl Element for TextElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let lines = self.input.read(cx).visual_lines.clamp(MIN_LINES, MAX_LINES);
+        let input = self.input.read(cx);
+        let lines = if input.single_line {
+            1
+        } else {
+            input.visual_lines.clamp(MIN_LINES, MAX_LINES)
+        };
         let mut style = Style::default();
         style.size.width = relative(1.).into();
         style.size.height = (window.line_height() * lines as f32).into();
@@ -590,7 +637,7 @@ impl Element for TextElement {
                 SharedString::from(text.clone()),
                 font_size,
                 &runs,
-                Some(bounds.size.width),
+                (!input.single_line).then_some(bounds.size.width),
                 None,
             )
             .unwrap_or_default();
@@ -739,6 +786,7 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
             .on_action(cx.listener(Self::newline))
+            .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::show_character_palette))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::cut))
@@ -780,6 +828,7 @@ pub fn key_bindings() -> Vec<gpui::KeyBinding> {
         KeyBinding::new("end", End, ctx),
         KeyBinding::new("enter", Newline, ctx),
         KeyBinding::new("shift-enter", Newline, ctx),
+        KeyBinding::new("escape", Cancel, ctx),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, ctx),
     ]
 }

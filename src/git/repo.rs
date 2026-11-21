@@ -63,6 +63,19 @@ pub struct HeadInfo {
     pub has_upstream: bool,
 }
 
+/// A local or remote-tracking branch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BranchInfo {
+    /// `main` for a local branch, `origin/main` for a remote one.
+    pub name: String,
+    pub remote: bool,
+    pub is_head: bool,
+    pub upstream: Option<String>,
+    pub short_sha: String,
+    pub summary: String,
+    pub time: i64,
+}
+
 pub struct Repo {
     repo: Repository,
     root: PathBuf,
@@ -319,12 +332,154 @@ impl Repo {
         self.git(&args, Some(message)).map(drop)
     }
 
+    /// Pushes the current branch. A branch without an upstream is published to
+    /// `origin` (or the only remote) and set to track it.
     pub fn push(root: &Path) -> Result<()> {
-        run_git(root, &["push"], None).map(drop)
+        let has_upstream = run_git(
+            root,
+            &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+            None,
+        )
+        .is_ok();
+        if has_upstream {
+            return run_git(root, &["push"], None).map(drop);
+        }
+        let remotes = run_git(root, &["remote"], None)?;
+        let remotes: Vec<&str> = remotes
+            .lines()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .collect();
+        let remote = if remotes.contains(&"origin") {
+            "origin"
+        } else {
+            match remotes.as_slice() {
+                [only] => only,
+                [] => bail!("This repository has no remote to push to."),
+                _ => bail!("No upstream branch, and more than one remote. Set one with `git push -u <remote> <branch>`."),
+            }
+        };
+        run_git(root, &["push", "-u", remote, "HEAD"], None).map(drop)
     }
 
     pub fn pull(root: &Path) -> Result<()> {
         run_git(root, &["pull", "--ff-only"], None).map(drop)
+    }
+
+    pub fn fetch(root: &Path) -> Result<()> {
+        run_git(root, &["fetch", "--all", "--prune"], None).map(drop)
+    }
+
+    /// Local and remote-tracking branches, local first, each sorted by name.
+    pub fn branches(&self) -> Result<Vec<BranchInfo>> {
+        let mut out = Vec::new();
+        for item in self.repo.branches(None)? {
+            let (branch, kind) = item?;
+            let Some(name) = branch.name()?.map(str::to_string) else {
+                continue;
+            };
+            let remote = kind == git2::BranchType::Remote;
+            if remote && name.ends_with("/HEAD") {
+                continue;
+            }
+            let commit = branch.get().peel_to_commit().ok();
+            out.push(BranchInfo {
+                is_head: !remote && branch.is_head(),
+                upstream: if remote {
+                    None
+                } else {
+                    branch
+                        .upstream()
+                        .ok()
+                        .and_then(|u| u.name().ok().flatten().map(str::to_string))
+                },
+                short_sha: commit.as_ref().map(|c| short(&c.id())).unwrap_or_default(),
+                summary: commit
+                    .as_ref()
+                    .and_then(|c| c.summary().map(str::to_string))
+                    .unwrap_or_default(),
+                time: commit.as_ref().map(|c| c.time().seconds()).unwrap_or(0),
+                name,
+                remote,
+            });
+        }
+        out.sort_by(|a, b| a.remote.cmp(&b.remote).then_with(|| a.name.cmp(&b.name)));
+        Ok(out)
+    }
+
+    /// Checks out a local branch, or creates a tracking branch for a remote one
+    /// (reusing a local branch of the same name if it exists).
+    pub fn switch_branch(&self, branch: &BranchInfo) -> Result<()> {
+        if !branch.remote {
+            return self.git(&["switch", &branch.name], None).map(drop);
+        }
+        let local = branch
+            .name
+            .split_once('/')
+            .map_or(branch.name.as_str(), |(_, rest)| rest);
+        if self
+            .repo
+            .find_branch(local, git2::BranchType::Local)
+            .is_ok()
+        {
+            self.git(&["switch", local], None).map(drop)
+        } else {
+            self.git(&["switch", "--track", &branch.name], None)
+                .map(drop)
+        }
+    }
+
+    /// Raw bytes of `path` in the working tree, for line-ending detection.
+    fn worktree_raw(&self, path: &str) -> Option<Vec<u8>> {
+        std::fs::read(self.abs_path(path)).ok()
+    }
+
+    fn index_raw(&self, path: &str) -> Option<Vec<u8>> {
+        let index = self.repo.index().ok()?;
+        let entry = index.get_path(Path::new(path), 0)?;
+        Some(self.repo.find_blob(entry.id).ok()?.content().to_vec())
+    }
+
+    /// Replaces the working-tree file with `text`, keeping its line endings.
+    pub fn write_worktree(&self, path: &str, text: &str) -> Result<()> {
+        let crlf = self.worktree_raw(path).is_some_and(|b| has_crlf(&b));
+        let abs = self.abs_path(path);
+        if let Some(dir) = abs.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(abs, with_eol(text, crlf))?;
+        Ok(())
+    }
+
+    /// Replaces the staged version of `path` with `text`, keeping its line endings
+    /// and file mode. Adds the path to the index when it is not there yet.
+    pub fn write_index(&self, path: &str, text: &str) -> Result<()> {
+        let crlf = self
+            .index_raw(path)
+            .or_else(|| self.worktree_raw(path))
+            .is_some_and(|b| has_crlf(&b));
+        let data = with_eol(text, crlf);
+        let mut index = self.repo.index()?;
+        let entry = match index.get_path(Path::new(path), 0) {
+            Some(e) => e,
+            None => git2::IndexEntry {
+                ctime: git2::IndexTime::new(0, 0),
+                mtime: git2::IndexTime::new(0, 0),
+                dev: 0,
+                ino: 0,
+                mode: 0o100644,
+                uid: 0,
+                gid: 0,
+                file_size: 0,
+                id: git2::Oid::zero(),
+                flags: 0,
+                flags_extended: 0,
+                path: path.as_bytes().to_vec(),
+            },
+        };
+        index.add_frombuffer(&entry, data.as_bytes())?;
+        index.write()?;
+        Ok(())
     }
 
     pub fn last_commit_message(&self) -> Option<String> {
@@ -372,6 +527,18 @@ fn run_git(root: &Path, args: &[&str], stdin: Option<&str>) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn has_crlf(bytes: &[u8]) -> bool {
+    bytes.windows(2).any(|w| w == b"\r\n")
+}
+
+fn with_eol(text: &str, crlf: bool) -> String {
+    if crlf {
+        text.replace("\r\n", "\n").replace('\n', "\r\n")
+    } else {
+        text.to_string()
+    }
 }
 
 pub(crate) fn short(oid: &git2::Oid) -> String {
@@ -544,6 +711,77 @@ mod tests {
         assert_eq!(first.summary, "Initial commit");
         assert!(blame.line(2).is_none());
         assert!(blame.line(3).is_some());
+    }
+
+    #[test]
+    fn writes_blocks_to_index_and_worktree() {
+        let f = Fixture::new("write");
+        f.write("a.txt", "one\nTWO\nthree\nfour\n");
+        let repo = f.repo();
+        // Stage only the first edit: index gets TWO, working tree keeps both edits.
+        repo.write_index("a.txt", "one\nTWO\nthree\n").unwrap();
+        assert_eq!(repo.index_text("a.txt").unwrap(), "one\nTWO\nthree\n");
+        let (staged, unstaged) = repo.status().unwrap();
+        assert_eq!(staged.len(), 1);
+        assert_eq!(unstaged.len(), 1);
+        repo.write_worktree("a.txt", "one\nTWO\nthree\n").unwrap();
+        let (_, unstaged) = repo.status().unwrap();
+        assert!(unstaged.is_empty());
+        // A brand-new path can be staged from a buffer.
+        repo.write_index("new.txt", "hello\n").unwrap();
+        assert_eq!(repo.index_text("new.txt").unwrap(), "hello\n");
+    }
+
+    #[test]
+    fn keeps_crlf_line_endings() {
+        let f = Fixture::new("crlf");
+        f.write("w.txt", "a\r\nb\r\n");
+        let repo = f.repo();
+        repo.write_worktree("w.txt", "a\nB\n").unwrap();
+        assert_eq!(std::fs::read(f.dir.join("w.txt")).unwrap(), b"a\r\nB\r\n");
+    }
+
+    #[test]
+    fn lists_and_switches_branches() {
+        let f = Fixture::new("branches");
+        let remote = f.dir.join("remote.git");
+        f.git(&["init", "-q", "--bare", remote.to_str().unwrap()]);
+        f.git(&["remote", "add", "origin", remote.to_str().unwrap()]);
+        f.git(&["push", "-q", "-u", "origin", "main"]);
+        f.git(&["branch", "feature"]);
+        f.git(&["push", "-q", "origin", "feature:topic"]);
+        f.git(&["fetch", "-q"]);
+        let repo = f.repo();
+        let branches = repo.branches().unwrap();
+        let names: Vec<(&str, bool, bool)> = branches
+            .iter()
+            .map(|b| (b.name.as_str(), b.remote, b.is_head))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("feature", false, false),
+                ("main", false, true),
+                ("origin/main", true, false),
+                ("origin/topic", true, false)
+            ]
+        );
+        assert_eq!(branches[1].upstream.as_deref(), Some("origin/main"));
+        let topic = branches.iter().find(|b| b.name == "origin/topic").unwrap();
+        repo.switch_branch(topic).unwrap();
+        assert_eq!(repo.head_info(false).branch, "topic");
+    }
+
+    #[test]
+    fn push_publishes_a_branch_without_upstream() {
+        let f = Fixture::new("publish");
+        let remote = f.dir.join("remote.git");
+        f.git(&["init", "-q", "--bare", remote.to_str().unwrap()]);
+        f.git(&["remote", "add", "origin", remote.to_str().unwrap()]);
+        Repo::push(&f.dir).unwrap();
+        let info = f.repo().head_info(false);
+        assert!(info.has_upstream);
+        Repo::fetch(&f.dir).unwrap();
     }
 
     #[test]

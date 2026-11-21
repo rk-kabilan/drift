@@ -1,9 +1,14 @@
 //! The status bar: repository, branch, ahead/behind, blame for the cursor line.
 
-use gpui::{div, prelude::*, px, Context, Window};
+use std::time::Duration;
+
+use gpui::{
+    div, percentage, prelude::*, px, svg, Animation, AnimationExt as _, Context, Transformation,
+    Window,
+};
 
 use super::widgets::{icon_sized, tooltip};
-use super::workspace::{CursorLine, Workspace};
+use super::workspace::{CursorLine, RemoteOp, Workspace};
 use crate::syntax::Lang;
 use crate::theme::{ActiveTheme as _, Appearance};
 
@@ -49,45 +54,84 @@ impl Workspace {
             )
             .child(
                 item("sb-branch")
+                    .cursor_pointer()
                     .child(icon_sized("branch", 14., fg))
                     .child(format!(
                         "{}{}",
                         head.branch,
                         if head.dirty { "*" } else { "" }
-                    )),
+                    ))
+                    .tooltip(tooltip(format!(
+                        "Switch branch ({}+Shift+B)",
+                        super::workspace::secondary_key()
+                    )))
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.open_branch_picker(window, cx)),
+                    ),
             );
-        if head.has_upstream {
-            let tip = format!(
-                "Synchronize: {} commit{} to pull, {} to push",
-                head.behind,
-                if head.behind == 1 { "" } else { "s" },
-                head.ahead
-            );
+
+        // Sync: a spinning icon and a short status while fetch/pull/push runs.
+        let spinning = self.busy.is_some();
+        let sync_icon = svg()
+            .path("icons/sync.svg")
+            .size(px(14.))
+            .flex_none()
+            .text_color(fg);
+        // Only animate while busy, so an idle window doesn't redraw every frame.
+        let sync_icon = if spinning {
+            sync_icon
+                .with_animation(
+                    "sync-spin",
+                    Animation::new(Duration::from_millis(900)).repeat(),
+                    |svg, delta| {
+                        // Counter-clockwise, matching the arrows in the icon.
+                        svg.with_transformation(Transformation::rotate(percentage(-delta)))
+                    },
+                )
+                .into_any_element()
+        } else {
+            sync_icon.into_any_element()
+        };
+        let (label, tip) = match (&self.busy, head.has_upstream, head.short_sha.is_some()) {
+            (Some(busy), _, _) => (busy.clone(), busy.clone()),
+            (None, true, _) => (
+                format!("{}↓ {}↑", head.behind, head.ahead),
+                format!(
+                    "Sync: {} commit{} to pull, {} to push. Click to fetch, pull and push.",
+                    head.behind,
+                    if head.behind == 1 { "" } else { "s" },
+                    head.ahead
+                ),
+            ),
+            (None, false, true) => (
+                "Publish branch".to_string(),
+                "No upstream branch. Click to push it to the remote.".to_string(),
+            ),
+            (None, false, false) => (String::new(), String::new()),
+        };
+        if !label.is_empty() {
             bar = bar.child(
                 item("sb-sync")
-                    .cursor_pointer()
-                    .child(icon_sized("sync", 14., fg))
-                    .child(format!("{}↓ {}↑", head.behind, head.ahead))
+                    .when(!spinning, |d| d.cursor_pointer())
+                    .child(sync_icon)
+                    .child(label)
                     .tooltip(tooltip(tip))
-                    .on_click(cx.listener(|this, _, _, cx| this.sync(cx))),
-            );
-        } else if head.short_sha.is_some() {
-            bar = bar.child(
-                item("sb-publish")
-                    .cursor_pointer()
-                    .child(icon_sized("sync", 14., fg))
-                    .child("Publish")
-                    .tooltip(tooltip(
-                        "No upstream branch. Push to set one up with `git push -u`.",
-                    )),
+                    .when(!spinning, |d| {
+                        d.on_click(cx.listener(|this, _, _, cx| this.remote(RemoteOp::Sync, cx)))
+                    }),
             );
         }
-        if let Some(busy) = &self.busy {
-            bar = bar.child(item("sb-busy").child(busy.clone()));
+        if let Some(note) = self.status_note {
+            bar = bar.child(
+                item("sb-note")
+                    .opacity(0.9)
+                    .child(icon_sized("check", 14., fg))
+                    .child(note),
+            );
         }
         bar = bar.child(div().flex_1());
 
-        if let Some(diff) = &self.diff {
+        if let Some(diff) = self.diff() {
             if let Some(CursorLine::New(line)) = diff.cursor {
                 if let Some(b) = diff.blame.as_ref().and_then(|b| b.line(line)) {
                     bar = bar.child(

@@ -11,9 +11,10 @@ use gpui::{
 };
 
 use crate::diff::{FileDiff, Layout, Row};
-use crate::git::{Blame, FileChange, HeadInfo, Repo};
+use crate::git::{Blame, BranchInfo, ChangeKind, FileChange, HeadInfo, Repo};
 use crate::syntax::Lang;
 use crate::theme::{ActiveTheme as _, Appearance, Theme, ThemeState};
+use crate::ui::picker::{Picker, PickerEvent, PickerItem};
 use crate::ui::text_input::{TextInput, TextInputEvent};
 
 actions!(
@@ -26,6 +27,15 @@ actions!(
         PreviousChange,
         ToggleLayout,
         ToggleTheme,
+        QuickOpen,
+        SwitchBranch,
+        CloseTab,
+        NextTab,
+        PreviousTab,
+        Fetch,
+        Pull,
+        Push,
+        Sync,
         Quit
     ]
 );
@@ -35,10 +45,13 @@ pub fn actions_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("secondary-enter", Commit, None),
         KeyBinding::new("secondary-r", Refresh, None),
         KeyBinding::new("f5", Refresh, None),
-        KeyBinding::new("alt-f5", NextChange, None),
-        KeyBinding::new("shift-alt-f5", PreviousChange, None),
         KeyBinding::new("f7", NextChange, None),
         KeyBinding::new("shift-f7", PreviousChange, None),
+        KeyBinding::new("secondary-p", QuickOpen, None),
+        KeyBinding::new("secondary-shift-b", SwitchBranch, None),
+        KeyBinding::new("secondary-w", CloseTab, None),
+        KeyBinding::new("ctrl-tab", NextTab, None),
+        KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
         KeyBinding::new("secondary-q", Quit, None),
     ]
 }
@@ -60,6 +73,37 @@ pub enum CursorLine {
     New(usize),
 }
 
+/// A dropdown menu that is currently open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Menu {
+    Commit,
+    More,
+}
+
+/// A remote operation running in the background.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RemoteOp {
+    Fetch,
+    Pull,
+    Push,
+    /// Fetch, then pull if behind, then push if ahead.
+    Sync,
+}
+
+/// Which way a merge arrow copies a change block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MergeDirection {
+    /// Copy the left (older) side over the right.
+    ToRight,
+    /// Copy the right (newer) side over the left.
+    ToLeft,
+}
+
+pub enum PickerKind {
+    Files(Vec<(bool, String)>),
+    Branches(Vec<BranchInfo>),
+}
+
 pub struct DiffState {
     pub change: FileChange,
     pub old_text: String,
@@ -74,6 +118,16 @@ pub struct DiffState {
     pub cursor: Option<CursorLine>,
 }
 
+/// An open diff. A single click opens a file in the preview tab (shown in
+/// italics, replaced by the next single click); a double click pins it.
+pub struct Tab {
+    pub staged: bool,
+    pub path: String,
+    pub pinned: bool,
+    pub diff: Option<DiffState>,
+    pub scroll: UniformListScrollHandle,
+}
+
 pub struct Workspace {
     pub(super) repo: Option<Repo>,
     pub(super) root: PathBuf,
@@ -83,15 +137,19 @@ pub struct Workspace {
     pub(super) unstaged: Vec<FileChange>,
     pub(super) staged_open: bool,
     pub(super) changes_open: bool,
-    pub(super) selected: Option<(bool, String)>,
-    pub(super) diff: Option<DiffState>,
+    pub(super) tabs: Vec<Tab>,
+    pub(super) active: Option<usize>,
     pub(super) layout: Layout,
     pub(super) message: Entity<TextInput>,
-    pub(super) commit_menu_open: bool,
+    pub(super) menu: Option<Menu>,
     pub(super) error: Option<String>,
+    /// Status text of the running remote operation, e.g. "Pushing…".
     pub(super) busy: Option<String>,
-    pub(super) diff_scroll: UniformListScrollHandle,
+    /// A short note shown in the status bar after an operation finishes.
+    pub(super) status_note: Option<&'static str>,
+    pub(super) picker: Option<(PickerKind, Entity<Picker>)>,
     focus_handle: FocusHandle,
+    _picker_subscription: Option<gpui::Subscription>,
     _tasks: Vec<gpui::Task<()>>,
     _subscriptions: Vec<gpui::Subscription>,
 }
@@ -109,9 +167,11 @@ impl Workspace {
         let message = cx.new(|cx| TextInput::new("Message", cx));
         let mut subscriptions =
             vec![
-                cx.subscribe(&message, |this: &mut Self, _, _: &TextInputEvent, cx| {
-                    this.error = None;
-                    cx.notify();
+                cx.subscribe(&message, |this: &mut Self, _, e: &TextInputEvent, cx| {
+                    if matches!(e, TextInputEvent::Changed) {
+                        this.error = None;
+                        cx.notify();
+                    }
                 }),
             ];
         subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
@@ -152,22 +212,24 @@ impl Workspace {
             unstaged: vec![],
             staged_open: true,
             changes_open: true,
-            selected: None,
-            diff: None,
+            tabs: vec![],
+            active: None,
             layout: Layout::SideBySide,
             message,
-            commit_menu_open: false,
+            menu: None,
             error: None,
             busy: None,
-            diff_scroll: UniformListScrollHandle::new(),
+            status_note: None,
+            picker: None,
             focus_handle: cx.focus_handle(),
+            _picker_subscription: None,
             _tasks: vec![poll],
             _subscriptions: subscriptions,
         };
         this.refresh(cx);
         // Show the first changed file straight away.
         if let Some(first) = this.unstaged.first().or(this.staged.first()).cloned() {
-            this.select(first.staged, first.path, cx);
+            this.open(first.staged, first.path, false, cx);
         }
         this
     }
@@ -179,40 +241,75 @@ impl Workspace {
         format!("{} · {}", self.head.repo_name, self.head.branch)
     }
 
-    /// Re-reads status and the selected file's diff.
+    pub fn diff(&self) -> Option<&DiffState> {
+        self.active
+            .and_then(|i| self.tabs.get(i))
+            .and_then(|t| t.diff.as_ref())
+    }
+
+    fn diff_mut(&mut self) -> Option<&mut DiffState> {
+        self.active
+            .and_then(|i| self.tabs.get_mut(i))
+            .and_then(|t| t.diff.as_mut())
+    }
+
+    pub fn active_tab(&self) -> Option<&Tab> {
+        self.active.and_then(|i| self.tabs.get(i))
+    }
+
+    /// Re-reads status and every open tab's diff.
     pub fn refresh(&mut self, cx: &mut Context<Self>) {
         let Some(repo) = &self.repo else { return };
         match repo.status() {
             Ok((staged, unstaged)) => {
-                let dirty = !staged.is_empty()
-                    || unstaged
-                        .iter()
-                        .any(|c| c.kind != crate::git::ChangeKind::Untracked);
+                let dirty =
+                    !staged.is_empty() || unstaged.iter().any(|c| c.kind != ChangeKind::Untracked);
                 self.head = repo.head_info(dirty);
                 self.staged = staged;
                 self.unstaged = unstaged;
             }
             Err(e) => self.error = Some(format!("{e:#}")),
         }
-        // Keep the selection if the file is still listed; otherwise fall back to its
-        // twin in the other group (e.g. a file that was just staged).
-        if let Some((staged, path)) = self.selected.clone() {
-            let exists = |list: &[FileChange]| list.iter().any(|c| c.path == path);
-            let target = if exists(self.list(staged)) {
-                Some(staged)
-            } else if exists(self.list(!staged)) {
-                Some(!staged)
-            } else {
-                None
-            };
-            match target {
-                Some(s) => self.load_diff(s, path, false, cx),
-                None => {
-                    self.selected = None;
-                    self.diff = None;
+
+        // A tab follows its file between the two groups (e.g. after staging) and
+        // closes when the file has no changes left.
+        let active_key = self.active_tab().map(|t| (t.staged, t.path.clone()));
+        let mut kept: Vec<Tab> = Vec::with_capacity(self.tabs.len());
+        for mut tab in std::mem::take(&mut self.tabs) {
+            let in_list = |staged: bool| self.list(staged).iter().any(|c| c.path == tab.path);
+            if !in_list(tab.staged) {
+                if in_list(!tab.staged) {
+                    tab.staged = !tab.staged;
+                    tab.diff = None;
+                } else {
+                    continue;
                 }
             }
+            if kept
+                .iter()
+                .any(|k| k.staged == tab.staged && k.path == tab.path)
+            {
+                continue;
+            }
+            kept.push(tab);
         }
+        self.tabs = kept;
+        self.active = if self.tabs.is_empty() {
+            None
+        } else {
+            active_key
+                .and_then(|(s, p)| {
+                    self.tabs
+                        .iter()
+                        .position(|t| t.path == p && t.staged == s)
+                        .or_else(|| self.tabs.iter().position(|t| t.path == p))
+                })
+                .or(Some(self.active.unwrap_or(0).min(self.tabs.len() - 1)))
+        };
+        for i in 0..self.tabs.len() {
+            self.load_tab(i, false);
+        }
+
         let message_placeholder = format!(
             "Message ({}+Enter to commit on '{}')",
             secondary_key(),
@@ -223,7 +320,7 @@ impl Workspace {
         cx.notify();
     }
 
-    fn list(&self, staged: bool) -> &[FileChange] {
+    pub(super) fn list(&self, staged: bool) -> &[FileChange] {
         if staged {
             &self.staged
         } else {
@@ -231,21 +328,89 @@ impl Workspace {
         }
     }
 
-    pub fn select(&mut self, staged: bool, path: String, cx: &mut Context<Self>) {
-        self.load_diff(staged, path, true, cx);
+    /// Shows a file's diff. Without `pin` it goes into the preview tab.
+    pub fn open(&mut self, staged: bool, path: String, pin: bool, cx: &mut Context<Self>) {
+        if let Some(ix) = self
+            .tabs
+            .iter()
+            .position(|t| t.staged == staged && t.path == path)
+        {
+            if pin {
+                self.tabs[ix].pinned = true;
+            }
+            self.active = Some(ix);
+        } else {
+            let tab = Tab {
+                staged,
+                path,
+                pinned: pin,
+                diff: None,
+                scroll: UniformListScrollHandle::new(),
+            };
+            match self.tabs.iter().position(|t| !t.pinned) {
+                Some(preview) if !pin => {
+                    self.tabs[preview] = tab;
+                    self.active = Some(preview);
+                }
+                _ => {
+                    let at = self.active.map_or(self.tabs.len(), |a| a + 1);
+                    self.tabs.insert(at, tab);
+                    self.active = Some(at);
+                }
+            }
+            self.load_tab(self.active.unwrap(), true);
+        }
         cx.notify();
     }
 
-    fn load_diff(&mut self, staged: bool, path: String, reset_view: bool, _cx: &mut Context<Self>) {
+    pub fn activate_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if ix < self.tabs.len() {
+            self.active = Some(ix);
+            cx.notify();
+        }
+    }
+
+    pub fn pin_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(t) = self.tabs.get_mut(ix) {
+            t.pinned = true;
+            cx.notify();
+        }
+    }
+
+    pub fn close_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if ix >= self.tabs.len() {
+            return;
+        }
+        self.tabs.remove(ix);
+        self.active = match self.active {
+            _ if self.tabs.is_empty() => None,
+            Some(a) if a > ix => Some(a - 1),
+            Some(a) => Some(a.min(self.tabs.len() - 1)),
+            None => None,
+        };
+        cx.notify();
+    }
+
+    fn cycle_tab(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if let Some(a) = self.active {
+            let n = self.tabs.len() as isize;
+            self.active = Some(((a as isize + delta).rem_euclid(n)) as usize);
+            cx.notify();
+        }
+    }
+
+    /// (Re)computes a tab's diff. Keeps fold and cursor state unless `reset_view`.
+    fn load_tab(&mut self, ix: usize, reset_view: bool) {
         let Some(repo) = &self.repo else { return };
+        let (staged, path) = (self.tabs[ix].staged, self.tabs[ix].path.clone());
         let Some(change) = self.list(staged).iter().find(|c| c.path == path).cloned() else {
             return;
         };
         let (old, new, left_label, right_label) = repo.change_texts(&change);
+        let tab = &mut self.tabs[ix];
 
-        let same_file = self.selected.as_ref() == Some(&(staged, path.clone()));
-        if !reset_view && same_file {
-            if let Some(d) = &mut self.diff {
+        if !reset_view {
+            if let Some(d) = &mut tab.diff {
                 if d.old_text == old && d.new_text == new && d.change == change {
                     d.left_label = left_label;
                     d.right_label = right_label;
@@ -253,22 +418,27 @@ impl Workspace {
                 }
             }
         }
-
         let file = FileDiff::new(&old, &new);
-        let keep = !reset_view && same_file;
-        let (expanded, cursor) = match (&self.diff, keep) {
-            (Some(d), true) => (d.expanded.clone(), d.cursor),
+        let (expanded, cursor) = match (&tab.diff, reset_view) {
+            (Some(d), false) => (d.expanded.clone(), d.cursor),
             _ => (HashSet::new(), None),
         };
         let rows = file.rows(self.layout, &expanded);
-        let blame = if change.kind == crate::git::ChangeKind::Untracked || new.is_empty() {
+        let blame = if change.kind == ChangeKind::Untracked || new.is_empty() {
             None
         } else {
             repo.blame(&change.path, &new).ok()
         };
         let lang = Lang::for_path(&change.path);
-        self.selected = Some((staged, path));
-        self.diff = Some(DiffState {
+        let cursor = if reset_view {
+            first_change_cursor(&rows)
+        } else {
+            cursor
+        };
+        if reset_view {
+            tab.scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
+        }
+        tab.diff = Some(DiffState {
             change,
             old_text: old,
             new_text: new,
@@ -281,19 +451,14 @@ impl Workspace {
             blame,
             cursor,
         });
-        if reset_view {
-            self.diff_scroll
-                .scroll_to_item(0, gpui::ScrollStrategy::Top);
-            // Put the cursor on the first change so the blame shows something useful.
-            if let Some(d) = &mut self.diff {
-                d.cursor = first_change_cursor(&d.rows);
-            }
-        }
     }
 
     pub fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
-        if let Some(d) = &mut self.diff {
-            d.rows = d.file.rows(self.layout, &d.expanded);
+        let layout = self.layout;
+        for tab in &mut self.tabs {
+            if let Some(d) = &mut tab.diff {
+                d.rows = d.file.rows(layout, &d.expanded);
+            }
         }
         cx.notify();
     }
@@ -304,14 +469,16 @@ impl Workspace {
     }
 
     pub fn expand_fold(&mut self, id: usize, cx: &mut Context<Self>) {
-        if let Some(d) = &mut self.diff {
+        let layout = self.layout;
+        if let Some(d) = self.diff_mut() {
             d.expanded.insert(id);
+            d.rows = d.file.rows(layout, &d.expanded);
         }
-        self.rebuild_rows(cx);
+        cx.notify();
     }
 
     pub fn set_cursor(&mut self, cursor: CursorLine, cx: &mut Context<Self>) {
-        if let Some(d) = &mut self.diff {
+        if let Some(d) = self.diff_mut() {
             d.cursor = Some(cursor);
         }
         cx.notify();
@@ -319,7 +486,10 @@ impl Workspace {
 
     /// Scrolls to the next (or previous) block of changed lines and moves the cursor there.
     pub fn jump_change(&mut self, forward: bool, cx: &mut Context<Self>) {
-        let Some(d) = &mut self.diff else { return };
+        let Some(tab) = self.active.and_then(|i| self.tabs.get_mut(i)) else {
+            return;
+        };
+        let Some(d) = &mut tab.diff else { return };
         let starts: Vec<usize> = change_starts(&d.rows);
         if starts.is_empty() {
             return;
@@ -343,9 +513,66 @@ impl Workspace {
                 .unwrap_or(*starts.last().unwrap())
         };
         d.cursor = cursor_for_row(&d.rows[target]);
-        self.diff_scroll
+        tab.scroll
             .scroll_to_item(target.saturating_sub(3), gpui::ScrollStrategy::Top);
         cx.notify();
+    }
+
+    /// Which merge arrows make sense for the active diff. Left is the index (or
+    /// HEAD) and right the working tree for unstaged files; for staged files left
+    /// is HEAD and right the index, and HEAD cannot be written.
+    pub fn merge_directions(&self) -> (bool, bool) {
+        match self.diff() {
+            Some(d) if d.old_text != "(binary file)" && d.new_text != "(binary file)" => {
+                let to_right = true;
+                let to_left = !d.change.staged;
+                (to_right, to_left)
+            }
+            _ => (false, false),
+        }
+    }
+
+    /// Copies one change block across the diff: towards the working tree
+    /// (revert), into the index (stage just this block), or from HEAD into the
+    /// index (unstage just this block).
+    pub fn merge_block(&mut self, block: usize, direction: MergeDirection, cx: &mut Context<Self>) {
+        let Some(d) = self.diff() else { return };
+        let Some(range) = d.file.blocks().get(block).cloned() else {
+            return;
+        };
+        let (staged, path) = (d.change.staged, d.change.path.clone());
+        let (old, new) = (d.old_text.clone(), d.new_text.clone());
+        let Some(repo) = &self.repo else { return };
+
+        // Refuse if the file changed since the diff was drawn.
+        let (cur_old, cur_new, _, _) = repo.change_texts(&d.change);
+        if cur_old != old || cur_new != new {
+            self.error = Some(format!(
+                "{} changed on disk. The diff was refreshed; try again.",
+                d.change.file_name()
+            ));
+            self.refresh(cx);
+            return;
+        }
+        let result = match (direction, staged) {
+            (MergeDirection::ToRight, false) => {
+                let text = crate::merge::splice_lines(&new, range.new, &old, range.old);
+                repo.write_worktree(&path, &text)
+            }
+            (MergeDirection::ToLeft, false) => {
+                let text = crate::merge::splice_lines(&old, range.old, &new, range.new);
+                repo.write_index(&path, &text)
+            }
+            (MergeDirection::ToRight, true) => {
+                let text = crate::merge::splice_lines(&new, range.new, &old, range.old);
+                repo.write_index(&path, &text)
+            }
+            (MergeDirection::ToLeft, true) => {
+                Err(anyhow::anyhow!("HEAD can't be changed from the diff."))
+            }
+        };
+        self.error = result.err().map(|e| format!("{e:#}"));
+        self.refresh(cx);
     }
 
     // ---- git operations ----
@@ -393,7 +620,7 @@ impl Workspace {
         }
         let (message, detail) = if changes.len() == 1 {
             let c = &changes[0];
-            if c.kind == crate::git::ChangeKind::Untracked {
+            if c.kind == ChangeKind::Untracked {
                 (
                     format!("Delete the untracked file {}?", c.file_name()),
                     "The file will be removed from disk.",
@@ -429,7 +656,7 @@ impl Workspace {
     }
 
     pub fn commit(&mut self, mode: CommitMode, window: &mut Window, cx: &mut Context<Self>) {
-        self.commit_menu_open = false;
+        self.menu = None;
         if self.busy.is_some() {
             return;
         }
@@ -454,51 +681,220 @@ impl Workspace {
             self.message.update(cx, |m, cx| m.set_text("", cx));
             window.focus(&self.message.focus_handle(cx));
             if mode == CommitMode::AndPush {
-                self.push(cx);
+                self.remote(RemoteOp::Push, cx);
             }
         }
     }
 
-    pub fn push(&mut self, cx: &mut Context<Self>) {
-        self.background("Pushing…", cx, |root| Repo::push(&root));
-    }
-
-    /// Pulls (fast-forward only) when behind, then pushes when ahead.
-    pub fn sync(&mut self, cx: &mut Context<Self>) {
-        let (behind, ahead) = (self.head.behind, self.head.ahead);
-        self.background("Syncing…", cx, move |root| {
-            if behind > 0 {
-                Repo::pull(&root)?;
-            }
-            if ahead > 0 || behind == 0 {
-                Repo::push(&root)?;
-            }
-            Ok(())
-        });
-    }
-
-    fn background(
-        &mut self,
-        label: &str,
-        cx: &mut Context<Self>,
-        job: impl FnOnce(PathBuf) -> anyhow::Result<()> + Send + 'static,
-    ) {
-        if self.busy.is_some() {
+    /// Runs a fetch, pull, push or sync in the background. The status bar shows
+    /// a spinning sync icon and what is happening at each step.
+    pub fn remote(&mut self, op: RemoteOp, cx: &mut Context<Self>) {
+        self.menu = None;
+        if self.busy.is_some() || self.repo.is_none() {
             return;
         }
-        self.busy = Some(label.to_string());
         let root = self.root.clone();
-        cx.notify();
         cx.spawn(async move |this, cx| {
-            let result = cx.background_spawn(async move { job(root) }).await;
+            let step = async |label: &'static str,
+                              job: fn(&std::path::Path) -> anyhow::Result<()>,
+                              cx: &mut gpui::AsyncApp|
+                   -> anyhow::Result<()> {
+                this.update(cx, |this, cx| {
+                    this.busy = Some(label.to_string());
+                    cx.notify();
+                })?;
+                let root = root.clone();
+                let result = cx.background_spawn(async move { job(&root) }).await;
+                this.update(cx, |this, cx| this.refresh(cx))?;
+                result
+            };
+            let result: anyhow::Result<&'static str> = async {
+                match op {
+                    RemoteOp::Fetch => step("Fetching…", Repo::fetch, cx).await.map(|_| "Fetched"),
+                    RemoteOp::Pull => step("Pulling…", Repo::pull, cx).await.map(|_| "Pulled"),
+                    RemoteOp::Push => step("Pushing…", Repo::push, cx).await.map(|_| "Pushed"),
+                    RemoteOp::Sync => {
+                        step("Fetching…", Repo::fetch, cx).await?;
+                        let (behind, upstream) =
+                            this.read_with(cx, |t, _| (t.head.behind, t.head.has_upstream))?;
+                        if behind > 0 {
+                            step("Pulling…", Repo::pull, cx).await?;
+                        }
+                        let ahead = this.read_with(cx, |t, _| t.head.ahead)?;
+                        if ahead > 0 || !upstream {
+                            step("Pushing…", Repo::push, cx).await?;
+                        }
+                        Ok("Up to date")
+                    }
+                }
+            }
+            .await;
             this.update(cx, |this, cx| {
                 this.busy = None;
-                this.error = result.err().map(|e| format!("{e:#}"));
+                match result {
+                    Ok(done) => this.flash(done, cx),
+                    Err(e) => this.error = Some(format!("{e:#}")),
+                }
                 this.refresh(cx);
             })
             .ok();
         })
         .detach();
+    }
+
+    /// Shows a short status message ("Pushed") for a couple of seconds.
+    fn flash(&mut self, text: &'static str, cx: &mut Context<Self>) {
+        self.status_note = Some(text);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(3)).await;
+            this.update(cx, |this, cx| {
+                if this.status_note == Some(text) {
+                    this.status_note = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    // ---- pickers ----
+
+    pub fn open_file_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.repo.is_none() {
+            return;
+        }
+        let t = cx.theme().clone();
+        let mut keys = Vec::new();
+        let mut items = Vec::new();
+        for (section, list) in [
+            ("Changes", &self.unstaged),
+            ("Staged Changes", &self.staged),
+        ] {
+            for c in list.iter() {
+                keys.push((c.staged, c.path.clone()));
+                items.push(PickerItem {
+                    haystack: c.path.clone(),
+                    label_start: c.path.len() - c.file_name().len(),
+                    note: String::new(),
+                    icon: "file",
+                    icon_color: Some(super::sidebar::file_badge(c.file_name()).1),
+                    badge: Some((
+                        c.kind.letter().to_string(),
+                        super::sidebar::status_color(c.kind, &t),
+                    )),
+                    section: Some(section),
+                });
+            }
+        }
+        let picker = cx.new(|cx| {
+            Picker::new(
+                "Search changed files by name",
+                "No changed files match.",
+                items,
+                cx,
+            )
+        });
+        self.show_picker(PickerKind::Files(keys), picker, window, cx);
+    }
+
+    pub fn open_branch_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(repo) = &self.repo else { return };
+        let branches = match repo.branches() {
+            Ok(b) => b,
+            Err(e) => {
+                self.error = Some(format!("{e:#}"));
+                cx.notify();
+                return;
+            }
+        };
+        let t = cx.theme().clone();
+        let items = branches
+            .iter()
+            .map(|b| {
+                let age = crate::git::relative_time_since(b.time);
+                let mut note = format!("{} · {}", b.short_sha, age);
+                if !b.summary.is_empty() {
+                    note = format!("{note} · {}", b.summary);
+                }
+                if let Some(up) = &b.upstream {
+                    note = format!("tracks {up} · {note}");
+                }
+                PickerItem {
+                    haystack: b.name.clone(),
+                    label_start: if b.remote {
+                        b.name.find('/').map_or(0, |i| i + 1)
+                    } else {
+                        0
+                    },
+                    note,
+                    icon: if b.remote { "cloud" } else { "branch" },
+                    icon_color: Some(if b.remote { t.syn_type } else { t.accent }),
+                    badge: b.is_head.then(|| ("current".to_string(), t.st_added)),
+                    section: Some(if b.remote {
+                        "Remote branches"
+                    } else {
+                        "Local branches"
+                    }),
+                }
+            })
+            .collect();
+        let picker = cx.new(|cx| {
+            Picker::new(
+                "Select a branch to check out",
+                "No branches match.",
+                items,
+                cx,
+            )
+        });
+        self.show_picker(PickerKind::Branches(branches), picker, window, cx);
+    }
+
+    fn show_picker(
+        &mut self,
+        kind: PickerKind,
+        picker: Entity<Picker>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.menu = None;
+        self._picker_subscription = Some(cx.subscribe_in(
+            &picker,
+            window,
+            |this, _, event: &PickerEvent, window, cx| {
+                match event {
+                    PickerEvent::Dismiss => {}
+                    PickerEvent::Confirm(ix) => match this.picker.as_ref().map(|p| &p.0) {
+                        Some(PickerKind::Files(keys)) => {
+                            if let Some((staged, path)) = keys.get(*ix).cloned() {
+                                this.open(staged, path, true, cx);
+                            }
+                        }
+                        Some(PickerKind::Branches(branches)) => {
+                            if let Some(b) = branches.get(*ix).cloned() {
+                                if !b.is_head {
+                                    this.run(cx, |r| r.switch_branch(&b));
+                                }
+                            }
+                        }
+                        None => {}
+                    },
+                }
+                this.close_picker(window, cx);
+            },
+        ));
+        window.focus(&picker.focus_handle(cx));
+        self.picker = Some((kind, picker));
+        cx.notify();
+    }
+
+    pub fn close_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.picker.take().is_some() {
+            self._picker_subscription = None;
+            window.focus(&self.message.focus_handle(cx));
+            cx.notify();
+        }
     }
 
     pub fn toggle_theme(&mut self, cx: &mut Context<Self>) {
@@ -570,7 +966,7 @@ pub fn secondary_key() -> &'static str {
 
 fn row_cursor_candidates(row: &Row) -> (Option<usize>, Option<usize>, bool) {
     match row {
-        Row::Pair { left, right } => {
+        Row::Pair { left, right, .. } => {
             let changed = left
                 .as_ref()
                 .is_some_and(|s| s.kind != crate::diff::LineKind::Context)
@@ -583,7 +979,9 @@ fn row_cursor_candidates(row: &Row) -> (Option<usize>, Option<usize>, bool) {
                 changed,
             )
         }
-        Row::Line { old, new, side } => (*old, *new, side.kind != crate::diff::LineKind::Context),
+        Row::Line { old, new, side, .. } => {
+            (*old, *new, side.kind != crate::diff::LineKind::Context)
+        }
         _ => (None, None, false),
     }
 }
@@ -701,17 +1099,37 @@ impl Render for Workspace {
                 this.set_layout(next, cx)
             }))
             .on_action(cx.listener(|this, _: &ToggleTheme, _, cx| this.toggle_theme(cx)))
+            .on_action(
+                cx.listener(|this, _: &QuickOpen, window, cx| this.open_file_picker(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &SwitchBranch, window, cx| {
+                    this.open_branch_picker(window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &CloseTab, _, cx| {
+                if let Some(a) = this.active {
+                    this.close_tab(a, cx)
+                }
+            }))
+            .on_action(cx.listener(|this, _: &NextTab, _, cx| this.cycle_tab(1, cx)))
+            .on_action(cx.listener(|this, _: &PreviousTab, _, cx| this.cycle_tab(-1, cx)))
+            .on_action(cx.listener(|this, _: &Fetch, _, cx| this.remote(RemoteOp::Fetch, cx)))
+            .on_action(cx.listener(|this, _: &Pull, _, cx| this.remote(RemoteOp::Pull, cx)))
+            .on_action(cx.listener(|this, _: &Push, _, cx| this.remote(RemoteOp::Push, cx)))
+            .on_action(cx.listener(|this, _: &Sync, _, cx| this.remote(RemoteOp::Sync, cx)))
             .on_action(|_: &Quit, _, cx| cx.quit())
             .on_mouse_down(
                 gpui::MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    if this.commit_menu_open {
-                        this.commit_menu_open = false;
+                    if this.menu.is_some() {
+                        this.menu = None;
                         cx.notify();
                     }
                 }),
             )
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .bg(t.chrome)
@@ -724,6 +1142,30 @@ impl Render for Workspace {
             .when(!show_title_bar, |d| d.pt(px(6.)))
             .child(body)
             .child(self.render_status_bar(window, cx))
+            .children(self.picker.as_ref().map(|(_, picker)| {
+                // Click outside the picker to close it.
+                div()
+                    .id("picker-backdrop")
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .size_full()
+                    .flex()
+                    .justify_center()
+                    .pt(px(48.))
+                    .on_mouse_down(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _, window, cx| this.close_picker(window, cx)),
+                    )
+                    .child(
+                        div()
+                            .h_full()
+                            .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation()
+                            })
+                            .child(picker.clone()),
+                    )
+            }))
     }
 }
 

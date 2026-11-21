@@ -10,7 +10,7 @@ use gpui::{
 
 use super::sidebar::{file_badge, status_color};
 use super::widgets::{icon, icon_button, tooltip};
-use super::workspace::{CursorLine, DiffState, Workspace};
+use super::workspace::{CursorLine, DiffState, MergeDirection, Workspace};
 use crate::diff::{Layout, LineKind, Row, Side};
 use crate::syntax::{self, Lang};
 use crate::theme::{ActiveTheme as _, Theme, ThemeState};
@@ -35,12 +35,13 @@ impl Workspace {
             .border_color(t.border)
             .rounded(px(8.));
 
-        let Some(diff) = &self.diff else {
+        let Some(diff) = self.diff() else {
             let msg = if self.staged.is_empty() && self.unstaged.is_empty() {
                 "Nothing to commit. The working tree is clean."
             } else {
-                "Select a file to see its changes."
+                "Select a file to see its changes, or press Cmd+P to find one."
             };
+            let msg = msg.replace("Cmd", super::workspace::secondary_key());
             return pane.child(
                 div()
                     .flex_1()
@@ -52,7 +53,7 @@ impl Workspace {
             );
         };
 
-        pane = pane.child(self.render_diff_header(diff, &t, cx));
+        pane = pane.child(self.render_diff_header(&t, cx));
         pane = pane.child(
             div()
                 .h(px(24.))
@@ -76,8 +77,13 @@ impl Workspace {
                     .text_color(t.muted)
                     .border_b_1()
                     .border_color(t.border)
+                    .child(column_head("commit", &diff.left_label, &t))
                     .child(
-                        column_head("commit", &diff.left_label, &t)
+                        div()
+                            .w(px(GUTTER))
+                            .flex_none()
+                            .h_full()
+                            .border_l_1()
                             .border_r_1()
                             .border_color(t.border),
                     )
@@ -103,6 +109,10 @@ impl Workspace {
         }
 
         let count = diff.rows.len();
+        let scroll = self
+            .active_tab()
+            .map(|t| t.scroll.clone())
+            .unwrap_or_default();
         pane.child(
             uniform_list(
                 "diff-rows",
@@ -111,32 +121,130 @@ impl Workspace {
                     let state = cx.global::<ThemeState>();
                     let t = state.theme.clone();
                     let mono: SharedString = state.mono_font.clone().into();
-                    let Some(diff) = &this.diff else {
+                    let ui: SharedString = state.ui_font.clone().into();
+                    let arrows = this.merge_directions();
+                    let Some(diff) = this.diff() else {
                         return vec![];
                     };
+                    let fonts = (mono, ui);
                     range
                         .filter_map(|ix| diff.rows.get(ix).map(|row| (ix, row)))
-                        .map(|(ix, row)| render_row(ix, row, diff, &t, &mono, cx))
+                        .map(|(ix, row)| render_row(ix, row, diff, arrows, &t, &fonts, cx))
                         .collect()
                 }),
             )
-            .track_scroll(self.diff_scroll.clone())
+            .track_scroll(scroll)
             .flex_1()
             .min_h_0(),
         )
     }
 
-    fn render_diff_header(
-        &self,
-        diff: &DiffState,
-        t: &Theme,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let (badge, badge_color) = file_badge(diff.change.file_name());
-        let where_label = if diff.change.staged {
-            "(Index)"
-        } else {
-            "(Working Tree)"
+    fn render_tabs(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let tabs = self.tabs.iter().enumerate().map(|(ix, tab)| {
+            let active = self.active == Some(ix);
+            let name = tab.path.rsplit('/').next().unwrap_or(&tab.path).to_string();
+            let (badge, badge_color) = file_badge(&name);
+            let kind = self
+                .list(tab.staged)
+                .iter()
+                .find(|c| c.path == tab.path)
+                .map(|c| c.kind);
+            let group: SharedString = format!("tab-{ix}").into();
+            let hover = t.hover;
+            div()
+                .id(SharedString::from(format!(
+                    "tab-{}-{}",
+                    tab.staged, tab.path
+                )))
+                .group(group.clone())
+                .h_full()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(px(6.))
+                .pl(px(12.))
+                .pr(px(6.))
+                .border_r_1()
+                .border_color(t.border)
+                .whitespace_nowrap()
+                .cursor_pointer()
+                .when(active, |d| {
+                    d.bg(t.editor).border_t_2().border_color(t.accent)
+                })
+                .when(!active, |d| {
+                    d.text_color(t.muted).hover(move |s| s.bg(hover))
+                })
+                .child(
+                    div()
+                        .text_size(px(8.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(badge_color)
+                        .child(badge),
+                )
+                .child(div().when(!tab.pinned, |d| d.italic()).child(name))
+                .child(
+                    div()
+                        .text_color(t.muted)
+                        .when(!tab.pinned, |d| d.italic())
+                        .child(if tab.staged {
+                            "(Index)"
+                        } else {
+                            "(Working Tree)"
+                        }),
+                )
+                .children(kind.map(|k| {
+                    div()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_size(px(12.))
+                        .text_color(status_color(k, t))
+                        .child(k.letter())
+                }))
+                .child({
+                    let close = icon_button(
+                        SharedString::from(format!("close-tab-{ix}")),
+                        "close",
+                        if active { t.fg } else { t.muted },
+                        cx,
+                        cx.listener(move |this, _, _, cx| this.close_tab(ix, cx)),
+                    )
+                    .w(px(18.))
+                    .h(px(18.))
+                    .tooltip(tooltip(format!(
+                        "Close ({}+W)",
+                        super::workspace::secondary_key()
+                    )));
+                    if active {
+                        close
+                    } else {
+                        close
+                            .invisible()
+                            .group_hover(group.clone(), |s| s.visible())
+                    }
+                })
+                .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| {
+                    this.activate_tab(ix, cx);
+                    if e.click_count() >= 2 {
+                        this.pin_tab(ix, cx);
+                    }
+                }))
+                .on_mouse_up(
+                    gpui::MouseButton::Middle,
+                    cx.listener(move |this, _, _, cx| this.close_tab(ix, cx)),
+                )
+        });
+        div()
+            .id("tabs")
+            .h_full()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .overflow_x_scroll()
+            .children(tabs)
+    }
+
+    fn render_diff_header(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(diff) = self.diff() else {
+            return div();
         };
         let layout = self.layout;
         let path = diff.change.path.clone();
@@ -175,47 +283,21 @@ impl Workspace {
             .bg(t.panel)
             .border_b_1()
             .border_color(t.border)
+            .child(self.render_tabs(t, cx))
             .child(
                 div()
-                    .h_full()
                     .flex()
+                    .flex_none()
                     .items_center()
-                    .gap(px(7.))
-                    .px(px(12.))
-                    .bg(t.editor)
-                    .border_t_2()
-                    .border_color(t.accent)
-                    .whitespace_nowrap()
-                    .child(
-                        div()
-                            .text_size(px(8.))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(badge_color)
-                            .child(badge),
-                    )
-                    .child(diff.change.file_name().to_string())
-                    .child(div().text_color(t.muted).child(where_label))
-                    .child(
-                        div()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_size(px(12.))
-                            .text_color(status_color(diff.change.kind, t))
-                            .child(diff.change.kind.letter()),
-                    )
+                    .gap(px(4.))
+                    .px(px(8.))
                     .child(
                         div()
                             .text_size(px(12.))
                             .text_color(t.muted)
+                            .mr(px(6.))
                             .child(format!("+{} −{}", diff.file.added, diff.file.removed)),
-                    ),
-            )
-            .child(div().flex_1())
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(4.))
-                    .px(px(8.))
+                    )
                     .child(
                         div()
                             .flex()
@@ -298,6 +380,70 @@ impl Workspace {
     }
 }
 
+/// Width of the column between the two sides that holds the merge arrows.
+const GUTTER: f32 = 34.;
+
+/// The merge arrows for the first row of a change block.
+fn merge_buttons(
+    block: usize,
+    arrows: (bool, bool),
+    staged: bool,
+    t: &Theme,
+    cx: &mut Context<Workspace>,
+) -> gpui::Div {
+    let button = |id: String,
+                  name: &'static str,
+                  tip: &'static str,
+                  dir: MergeDirection,
+                  cx: &mut Context<Workspace>| {
+        let hover = t.hover;
+        div()
+            .id(SharedString::from(id))
+            .w(px(15.))
+            .h(px(18.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(3.))
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover))
+            .child(super::widgets::icon_sized(name, 13., t.accent))
+            .tooltip(tooltip(tip))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.merge_block(block, dir, cx)
+            }))
+    };
+    let (to_right, to_left) = arrows;
+    let right_tip = if staged {
+        "Unstage this change"
+    } else {
+        "Revert this change in the working tree"
+    };
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .when(to_right, |d| {
+            d.child(button(
+                format!("merge-r-{block}"),
+                "arrow-right",
+                right_tip,
+                MergeDirection::ToRight,
+                cx,
+            ))
+        })
+        .when(to_left, |d| {
+            d.child(button(
+                format!("merge-l-{block}"),
+                "arrow-left",
+                "Stage this change",
+                MergeDirection::ToLeft,
+                cx,
+            ))
+        })
+}
+
 fn breadcrumbs(path: &str, t: &Theme) -> Vec<gpui::AnyElement> {
     let mut out = Vec::new();
     let parts: Vec<&str> = path.split('/').collect();
@@ -332,10 +478,12 @@ fn render_row(
     ix: usize,
     row: &Row,
     diff: &DiffState,
+    arrows: (bool, bool),
     t: &Theme,
-    mono: &SharedString,
+    fonts: &(SharedString, SharedString),
     cx: &mut Context<Workspace>,
 ) -> gpui::AnyElement {
+    let (mono, ui) = fonts;
     let base = div()
         .id(ix)
         .h(px(ROW_HEIGHT))
@@ -357,7 +505,7 @@ fn render_row(
             let id = *id;
             let border = t.border;
             base.items_center()
-                .font_family(cx.global::<ThemeState>().ui_font.clone())
+                .font_family(ui.clone())
                 .justify_center()
                 .gap(px(6.))
                 .text_color(t.muted)
@@ -375,7 +523,7 @@ fn render_row(
                 .on_click(cx.listener(move |this, _, _, cx| this.expand_fold(id, cx)))
                 .into_any_element()
         }
-        Row::Pair { left, right } => {
+        Row::Pair { left, right, block } => {
             let cursor_new = matches!(diff.cursor, Some(CursorLine::New(n)) if right.as_ref().is_some_and(|s| s.line == n));
             let cursor_old = right.is_none()
                 && matches!(diff.cursor, Some(CursorLine::Old(o)) if left.as_ref().is_some_and(|s| s.line == o));
@@ -383,24 +531,36 @@ fn render_row(
                 .as_ref()
                 .map(|s| CursorLine::New(s.line))
                 .or(left.as_ref().map(|s| CursorLine::Old(s.line)));
-            base.child(
-                half(left.as_ref(), cursor_old, None, diff.lang, t)
-                    .border_r_1()
-                    .border_color(t.border),
-            )
-            .child(half(
-                right.as_ref(),
-                cursor_new,
-                blame_ghost(diff, cursor_new, right.as_ref()),
-                diff.lang,
-                t,
-            ))
-            .when_some(click_target, |d, target| {
-                d.on_click(cx.listener(move |this, _, _, cx| this.set_cursor(target, cx)))
-            })
-            .into_any_element()
+            let gutter = div()
+                .w(px(GUTTER))
+                .flex_none()
+                .h_full()
+                .border_l_1()
+                .border_r_1()
+                .border_color(t.border)
+                .when_some(*block, |d, b| {
+                    d.child(merge_buttons(b, arrows, diff.change.staged, t, cx))
+                });
+            base.child(half(left.as_ref(), cursor_old, None, diff.lang, t))
+                .child(gutter)
+                .child(half(
+                    right.as_ref(),
+                    cursor_new,
+                    blame_ghost(diff, cursor_new, right.as_ref()),
+                    diff.lang,
+                    t,
+                ))
+                .when_some(click_target, |d, target| {
+                    d.on_click(cx.listener(move |this, _, _, cx| this.set_cursor(target, cx)))
+                })
+                .into_any_element()
         }
-        Row::Line { old, new, side } => {
+        Row::Line {
+            old,
+            new,
+            side,
+            block,
+        } => {
             let is_cursor = match diff.cursor {
                 Some(CursorLine::New(n)) => *new == Some(n),
                 Some(CursorLine::Old(o)) => new.is_none() && *old == Some(o),
@@ -437,6 +597,13 @@ fn render_row(
                         .child(sign),
                 )
                 .child(code(side, diff.lang, t, ghost, t.ghost))
+                .when_some(*block, |d, b| {
+                    d.child(
+                        merge_buttons(b, arrows, diff.change.staged, t, cx)
+                            .flex_none()
+                            .px(px(6.)),
+                    )
+                })
                 .when_some(target, |d, target| {
                     d.on_click(cx.listener(move |this, _, _, cx| this.set_cursor(target, cx)))
                 })

@@ -36,12 +36,16 @@ pub enum Row {
     Pair {
         left: Option<Side>,
         right: Option<Side>,
+        /// Set on the first row of a change block: its index in [`FileDiff::blocks`].
+        block: Option<usize>,
     },
     /// Inline: a single line, which carries the old and/or new line number.
     Line {
         old: Option<usize>,
         new: Option<usize>,
         side: Side,
+        /// Set on the first row of a change block: its index in [`FileDiff::blocks`].
+        block: Option<usize>,
     },
     /// A folded run of unchanged lines; clicking it expands fold `id`.
     Fold { id: usize, hidden: usize },
@@ -60,9 +64,18 @@ enum Block {
         len: usize,
     },
     Change {
+        old_start: usize,
+        new_start: usize,
         dels: Vec<Side>,
         adds: Vec<Side>,
     },
+}
+
+/// The line ranges (0-based, end-exclusive) a change block covers on each side.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChangeBlock {
+    pub old: Range<usize>,
+    pub new: Range<usize>,
 }
 
 /// A computed diff between two texts.
@@ -102,6 +115,7 @@ impl FileDiff {
                     removed += old_len;
                     push_change(
                         &mut blocks,
+                        (old_index, op.new_range().start),
                         side_lines(&old_lines, old_index, old_len, LineKind::Removed),
                         vec![],
                     );
@@ -112,6 +126,7 @@ impl FileDiff {
                     added += new_len;
                     push_change(
                         &mut blocks,
+                        (op.old_range().start, new_index),
                         vec![],
                         side_lines(&new_lines, new_index, new_len, LineKind::Added),
                     );
@@ -126,6 +141,7 @@ impl FileDiff {
                     added += new_len;
                     push_change(
                         &mut blocks,
+                        (old_index, new_index),
                         side_lines(&old_lines, old_index, old_len, LineKind::Removed),
                         side_lines(&new_lines, new_index, new_len, LineKind::Added),
                     );
@@ -133,7 +149,7 @@ impl FileDiff {
             }
         }
         for block in &mut blocks {
-            if let Block::Change { dels, adds } = block {
+            if let Block::Change { dels, adds, .. } = block {
                 for (d, a) in dels.iter_mut().zip(adds.iter_mut()) {
                     if let Some((dr, ar)) = intra_line(&d.text, &a.text) {
                         d.changes = dr;
@@ -151,6 +167,25 @@ impl FileDiff {
         }
     }
 
+    /// Every change block, in order; `Row`s refer to these by index.
+    pub fn blocks(&self) -> Vec<ChangeBlock> {
+        self.blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Change {
+                    old_start,
+                    new_start,
+                    dels,
+                    adds,
+                } => Some(ChangeBlock {
+                    old: *old_start..old_start + dels.len(),
+                    new: *new_start..new_start + adds.len(),
+                }),
+                Block::Equal { .. } => None,
+            })
+            .collect()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.added == 0 && self.removed == 0
     }
@@ -160,6 +195,7 @@ impl FileDiff {
         // First pass: a flat list of line rows and folds.
         let mut items: Vec<Row> = Vec::new();
         let mut fold_id = 0;
+        let mut change_ix = 0;
         let last = self.blocks.len().saturating_sub(1);
         for (bi, block) in self.blocks.iter().enumerate() {
             match block {
@@ -201,41 +237,44 @@ impl FileDiff {
                             Layout::SideBySide => Row::Pair {
                                 left: Some(side(old_start + i + 1)),
                                 right: Some(side(new_start + i + 1)),
+                                block: None,
                             },
                             Layout::Inline => Row::Line {
                                 old: Some(old_start + i + 1),
                                 new: Some(new_start + i + 1),
                                 side: side(new_start + i + 1),
+                                block: None,
                             },
                         });
                     }
                 }
-                Block::Change { dels, adds } => match layout {
-                    Layout::SideBySide => {
-                        for i in 0..dels.len().max(adds.len()) {
-                            items.push(Row::Pair {
-                                left: dels.get(i).cloned(),
-                                right: adds.get(i).cloned(),
-                            });
+                Block::Change { dels, adds, .. } => {
+                    let this_block = change_ix;
+                    change_ix += 1;
+                    let first = |i: usize| (i == 0).then_some(this_block);
+                    match layout {
+                        Layout::SideBySide => {
+                            for i in 0..dels.len().max(adds.len()) {
+                                items.push(Row::Pair {
+                                    left: dels.get(i).cloned(),
+                                    right: adds.get(i).cloned(),
+                                    block: first(i),
+                                });
+                            }
+                        }
+                        Layout::Inline => {
+                            for (i, side) in dels.iter().chain(adds.iter()).enumerate() {
+                                let removed = side.kind == LineKind::Removed;
+                                items.push(Row::Line {
+                                    old: removed.then_some(side.line),
+                                    new: (!removed).then_some(side.line),
+                                    side: side.clone(),
+                                    block: first(i),
+                                });
+                            }
                         }
                     }
-                    Layout::Inline => {
-                        for d in dels {
-                            items.push(Row::Line {
-                                old: Some(d.line),
-                                new: None,
-                                side: d.clone(),
-                            });
-                        }
-                        for a in adds {
-                            items.push(Row::Line {
-                                old: None,
-                                new: Some(a.line),
-                                side: a.clone(),
-                            });
-                        }
-                    }
-                },
+                }
             }
         }
 
@@ -299,12 +338,22 @@ fn side_lines(lines: &[String], start: usize, len: usize, kind: LineKind) -> Vec
         .collect()
 }
 
-fn push_change(blocks: &mut Vec<Block>, mut d: Vec<Side>, mut a: Vec<Side>) {
-    if let Some(Block::Change { dels, adds }) = blocks.last_mut() {
+fn push_change(
+    blocks: &mut Vec<Block>,
+    starts: (usize, usize),
+    mut d: Vec<Side>,
+    mut a: Vec<Side>,
+) {
+    if let Some(Block::Change { dels, adds, .. }) = blocks.last_mut() {
         dels.append(&mut d);
         adds.append(&mut a);
     } else {
-        blocks.push(Block::Change { dels: d, adds: a });
+        blocks.push(Block::Change {
+            old_start: starts.0,
+            new_start: starts.1,
+            dels: d,
+            adds: a,
+        });
     }
 }
 
@@ -312,7 +361,7 @@ fn hunk_header(items: &[Row]) -> String {
     let (mut old_first, mut old_count, mut new_first, mut new_count) = (None, 0, None, 0);
     for item in items {
         let (o, n) = match item {
-            Row::Pair { left, right } => (
+            Row::Pair { left, right, .. } => (
                 left.as_ref().map(|s| s.line),
                 right.as_ref().map(|s| s.line),
             ),
@@ -451,6 +500,7 @@ mod tests {
         let Row::Pair {
             left: Some(l),
             right: Some(r),
+            ..
         } = &rows[1]
         else {
             panic!("{rows:?}")
@@ -495,6 +545,33 @@ mod tests {
                 LineKind::Context
             ]
         );
+    }
+
+    #[test]
+    fn blocks_report_line_ranges() {
+        let d = FileDiff::new("a\nb\nc\nd\n", "a\nB\nc\nd\ne\n");
+        assert_eq!(
+            d.blocks(),
+            [
+                ChangeBlock {
+                    old: 1..2,
+                    new: 1..2
+                },
+                ChangeBlock {
+                    old: 4..4,
+                    new: 4..5
+                }
+            ]
+        );
+        let rows = d.rows(Layout::SideBySide, &HashSet::new());
+        let starts: Vec<usize> = rows
+            .iter()
+            .filter_map(|r| match r {
+                Row::Pair { block, .. } => *block,
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts, [0, 1]);
     }
 
     #[test]

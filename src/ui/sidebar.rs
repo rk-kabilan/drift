@@ -6,7 +6,7 @@ use gpui::{
 };
 
 use super::widgets::{icon, icon_button, tooltip};
-use super::workspace::{CommitMode, Workspace};
+use super::workspace::{CommitMode, Menu, RemoteOp, Workspace};
 use crate::git::{ChangeKind, FileChange};
 use crate::theme::{ActiveTheme as _, Theme};
 
@@ -92,6 +92,67 @@ impl Workspace {
                 )
                 .tooltip(tooltip("Refresh")),
             )
+            .child(
+                div()
+                    .relative()
+                    .child(
+                        icon_button(
+                            "hdr-more",
+                            "more",
+                            t.fg,
+                            cx,
+                            cx.listener(|this, _, _, cx| {
+                                this.menu = if this.menu == Some(Menu::More) {
+                                    None
+                                } else {
+                                    Some(Menu::More)
+                                };
+                                cx.notify();
+                            }),
+                        )
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .tooltip(tooltip("More Actions")),
+                    )
+                    .when(self.menu == Some(Menu::More), |d| {
+                        let busy = self.busy.is_some();
+                        let remote = move |op: RemoteOp| {
+                            move |this: &mut Workspace,
+                                  _: &mut Window,
+                                  cx: &mut Context<Workspace>| {
+                                this.remote(op, cx)
+                            }
+                        };
+                        d.child(render_menu(
+                            t,
+                            point(px(-180.), px(26.)),
+                            vec![
+                                MenuItem::new("mi-fetch", "Fetch", !busy, remote(RemoteOp::Fetch)),
+                                MenuItem::new("mi-pull", "Pull", !busy, remote(RemoteOp::Pull)),
+                                MenuItem::new("mi-push", "Push", !busy, remote(RemoteOp::Push)),
+                                MenuItem::new(
+                                    "mi-sync",
+                                    "Sync (fetch, pull, push)",
+                                    !busy,
+                                    remote(RemoteOp::Sync),
+                                ),
+                                MenuItem::separator(),
+                                MenuItem::new(
+                                    "mi-branch",
+                                    "Switch Branch…",
+                                    true,
+                                    |this, window, cx| this.open_branch_picker(window, cx),
+                                ),
+                                MenuItem::new(
+                                    "mi-open",
+                                    "Go to File…",
+                                    true,
+                                    |this, window, cx| this.open_file_picker(window, cx),
+                                ),
+                            ],
+                            cx,
+                        ))
+                    }),
+            )
     }
 
     fn render_commit_box(
@@ -101,7 +162,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let busy = self.busy.clone();
-        let menu_open = self.commit_menu_open;
+        let menu_open = self.menu == Some(Menu::Commit);
         let commit_label: SharedString = busy
             .clone()
             .map(SharedString::from)
@@ -167,7 +228,11 @@ impl Workspace {
                             .child(icon("chevron-down", t.on_accent))
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.commit_menu_open = !this.commit_menu_open;
+                                this.menu = if this.menu == Some(Menu::Commit) {
+                                    None
+                                } else {
+                                    Some(Menu::Commit)
+                                };
                                 cx.notify();
                             })),
                     )
@@ -176,51 +241,32 @@ impl Workspace {
     }
 
     fn render_commit_menu(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let item =
-            |id: &'static str, label: &'static str, mode: CommitMode, cx: &mut Context<Self>| {
-                let hover = t.sel;
-                let hover_fg = t.sel_fg;
-                div()
-                    .id(id)
-                    .px(px(10.))
-                    .h(px(26.))
-                    .flex()
-                    .items_center()
-                    .rounded(px(4.))
-                    .cursor_pointer()
-                    .hover(move |s| s.bg(hover).text_color(hover_fg))
-                    .child(label)
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                    .on_click(cx.listener(move |this, _, window, cx| this.commit(mode, window, cx)))
-            };
-        deferred(
-            anchored()
-                .position_mode(gpui::AnchoredPositionMode::Local)
-                .offset(point(px(0.), px(32.)))
-                .child(
-                    div()
-                        .w(px(276.))
-                        .p(px(4.))
-                        .flex()
-                        .flex_col()
-                        .bg(t.panel)
-                        .text_color(t.fg)
-                        .border_1()
-                        .border_color(t.border)
-                        .rounded(px(6.))
-                        .shadow_lg()
-                        .child(item("m-commit", "Commit Staged", CommitMode::Staged, cx))
-                        .child(item("m-all", "Commit All", CommitMode::All, cx))
-                        .child(item(
-                            "m-amend",
-                            "Commit Staged (Amend)",
-                            CommitMode::Amend,
-                            cx,
-                        ))
-                        .child(item("m-push", "Commit & Push", CommitMode::AndPush, cx)),
+        let commit = move |mode: CommitMode| {
+            move |this: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>| {
+                this.commit(mode, window, cx)
+            }
+        };
+        render_menu(
+            t,
+            point(px(0.), px(32.)),
+            vec![
+                MenuItem::new(
+                    "m-commit",
+                    "Commit Staged",
+                    true,
+                    commit(CommitMode::Staged),
                 ),
+                MenuItem::new("m-all", "Commit All", true, commit(CommitMode::All)),
+                MenuItem::new(
+                    "m-amend",
+                    "Commit Staged (Amend)",
+                    true,
+                    commit(CommitMode::Amend),
+                ),
+                MenuItem::new("m-push", "Commit & Push", true, commit(CommitMode::AndPush)),
+            ],
+            cx,
         )
-        .with_priority(1)
     }
 
     fn render_group(&self, staged: bool, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -357,9 +403,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let selected = self
-            .selected
-            .as_ref()
-            .is_some_and(|(s, p)| *s == change.staged && *p == change.path);
+            .active_tab()
+            .is_some_and(|t| t.staged == change.staged && t.path == change.path);
         let (bg, fg) = if selected {
             (Some(t.sel), t.sel_fg)
         } else {
@@ -446,7 +491,10 @@ impl Workspace {
             .text_color(fg)
             .when_some(bg, |d, bg| d.bg(bg))
             .when(!selected, |d| d.hover(move |s| s.bg(hover)))
-            .on_click(cx.listener(move |this, _, _, cx| this.select(staged, path.clone(), cx)))
+            // Single click previews the diff; double click keeps it open in its own tab.
+            .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| {
+                this.open(staged, path.clone(), e.click_count() >= 2, cx)
+            }))
             .child(
                 div()
                     .w(px(16.))
@@ -525,4 +573,106 @@ pub(super) fn file_badge(name: &str) -> (String, gpui::Hsla) {
             )
         }
     }
+}
+
+type MenuAction = Box<dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)>;
+
+/// One row of a dropdown menu.
+pub(super) struct MenuItem {
+    id: &'static str,
+    label: &'static str,
+    enabled: bool,
+    action: Option<MenuAction>,
+}
+
+impl MenuItem {
+    pub(super) fn new(
+        id: &'static str,
+        label: &'static str,
+        enabled: bool,
+        action: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
+    ) -> Self {
+        Self {
+            id,
+            label,
+            enabled,
+            action: Some(Box::new(action)),
+        }
+    }
+
+    pub(super) fn separator() -> Self {
+        Self {
+            id: "",
+            label: "",
+            enabled: false,
+            action: None,
+        }
+    }
+}
+
+/// A dropdown anchored at `offset` from its parent, drawn above everything else.
+pub(super) fn render_menu(
+    t: &Theme,
+    offset: gpui::Point<gpui::Pixels>,
+    items: Vec<MenuItem>,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    let rows = items.into_iter().enumerate().map(|(i, item)| {
+        let Some(action) = item.action else {
+            return div()
+                .h(px(1.))
+                .my(px(4.))
+                .mx(px(6.))
+                .bg(t.border)
+                .into_any_element();
+        };
+        let (hover, hover_fg) = (t.sel, t.sel_fg);
+        div()
+            .id(if item.id.is_empty() {
+                SharedString::from(format!("menu-{i}"))
+            } else {
+                item.id.into()
+            })
+            .px(px(10.))
+            .h(px(26.))
+            .flex()
+            .items_center()
+            .rounded(px(4.))
+            .whitespace_nowrap()
+            .when(item.enabled, |d| {
+                d.cursor_pointer()
+                    .hover(move |s| s.bg(hover).text_color(hover_fg))
+            })
+            .when(!item.enabled, |d| d.text_color(t.faint))
+            .child(item.label)
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .when(item.enabled, |d| {
+                d.on_click(cx.listener(move |this, _, window, cx| {
+                    this.menu = None;
+                    action(this, window, cx);
+                    cx.notify();
+                }))
+            })
+            .into_any_element()
+    });
+    deferred(
+        anchored()
+            .position_mode(gpui::AnchoredPositionMode::Local)
+            .offset(offset)
+            .child(
+                div()
+                    .min_w(px(200.))
+                    .p(px(4.))
+                    .flex()
+                    .flex_col()
+                    .bg(t.panel)
+                    .text_color(t.fg)
+                    .border_1()
+                    .border_color(t.border)
+                    .rounded(px(6.))
+                    .shadow_lg()
+                    .children(rows),
+            ),
+    )
+    .with_priority(1)
 }

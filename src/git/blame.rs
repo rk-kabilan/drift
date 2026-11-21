@@ -69,6 +69,15 @@ pub(super) fn blame(repo: &Repository, path: &str, contents: &str) -> Result<Bla
     Ok(Blame { lines })
 }
 
+/// "3 days ago" for a Unix timestamp.
+pub fn relative_time_since(time: i64) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    relative_time(now - time)
+}
+
 pub fn relative_time(secs: i64) -> String {
     let secs = secs.max(0);
     let (n, unit) = match secs {

@@ -1,4 +1,5 @@
 mod diff_pane;
+pub mod picker;
 pub mod prompt;
 mod sidebar;
 mod status_bar;

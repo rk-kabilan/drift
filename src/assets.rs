@@ -13,12 +13,15 @@ macro_rules! icons {
 
 static ICONS: &[(&str, &[u8])] = icons![
     "arrow-down",
+    "arrow-left",
+    "arrow-right",
     "arrow-up",
     "branch",
     "check",
     "chevron-down",
     "chevron-right",
     "close",
+    "cloud",
     "commit",
     "discard",
     "file",
@@ -31,6 +34,7 @@ static ICONS: &[(&str, &[u8])] = icons![
     "plus",
     "refresh",
     "repo",
+    "search",
     "split",
     "sun",
     "sync",
