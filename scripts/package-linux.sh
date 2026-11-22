@@ -110,7 +110,7 @@ Name: drift
 Version: $VERSION
 Release: 1
 Summary: Fast Git desktop client
-License: MIT
+License: Apache-2.0
 URL: https://github.com/rk-kabilan/drift
 Requires: git
 Requires: libvulkan.so.1()(64bit)

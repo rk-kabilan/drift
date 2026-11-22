@@ -115,3 +115,9 @@ Defaults (change them in Settings → Keyboard Shortcuts):
 | `Ctrl+Shift+G` / `Cmd+Shift+G` | Show or hide the history graph |
 | `Ctrl+,` / `Cmd+,` | Settings |
 | `Ctrl+Q` / `Cmd+Q` | Quit |
+
+## License
+
+Drift is licensed under the [Apache License 2.0](LICENSE). You can use, fork and modify it under that license's terms, which include keeping the copyright and [NOTICE](NOTICE). The license does not grant use of the Drift name or logo.
+
+This repository does not accept outside contributions. Fork it to make your own changes.

@@ -1,0 +1,25 @@
+# Closes pull requests from people who are not collaborators on this repo.
+# Drift doesn't take outside contributions: fork it to make your own changes.
+# Issues stay open to everyone.
+name: Close outside pull requests
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  close:
+    # OWNER, MEMBER and COLLABORATOR are people with access to the repo.
+    if: ${{ !contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) }}
+    runs-on: ubuntu-latest
+    steps:
+      # Never checks out the pull request's code, so it is safe to run on pull_request_target.
+      - name: Comment and close
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.html_url }}
+        run: |
+          gh pr close "$PR" --comment "Thanks for your interest in Drift. This repository doesn't accept outside pull requests, so this one has been closed automatically. You're welcome to keep your changes in your fork, or open an issue to report a bug or suggest a feature."
