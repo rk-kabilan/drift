@@ -56,6 +56,7 @@ impl Workspace {
                     })
                     .child(self.render_group(false, &t, cx)),
             )
+            .child(self.render_history(&t, cx))
     }
 
     fn render_sidebar_header(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
@@ -74,6 +75,7 @@ impl Workspace {
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child("SOURCE CONTROL"),
             )
+            .children(self.remote_buttons("hdr", cx))
             .child(
                 icon_button(
                     "hdr-commit",
@@ -429,9 +431,7 @@ impl Workspace {
         t: &Theme,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let selected = self
-            .active_tab()
-            .is_some_and(|t| t.staged == change.staged && t.path == change.path);
+        let selected = self.row_selected(change.staged, &change.path);
         let (bg, fg) = if selected {
             (Some(t.sel), t.sel_fg)
         } else {
@@ -519,9 +519,35 @@ impl Workspace {
             .when_some(bg, |d, bg| d.bg(bg))
             .when(!selected, |d| d.hover(move |s| s.bg(hover)))
             // Single click previews the diff; double click keeps it open in its own tab.
-            .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| {
-                this.open(staged, path.clone(), e.click_count() >= 2, cx)
-            }))
+            // Cmd/Ctrl-click and Shift-click pick several files.
+            .on_click({
+                let path = path.clone();
+                cx.listener(move |this, e: &gpui::ClickEvent, _, cx| {
+                    let m = e.modifiers();
+                    if m.shift {
+                        this.pick_range(staged, &path, cx);
+                    } else if m.secondary() {
+                        this.pick_toggle(staged, &path, cx);
+                    } else {
+                        this.picked = vec![(staged, path.clone())];
+                        this.pick_anchor = Some((staged, path.clone()));
+                        this.open(staged, path.clone(), e.click_count() >= 2, cx)
+                    }
+                })
+            })
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, e: &gpui::MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    let key = (staged, path.clone());
+                    if !this.picked.contains(&key) {
+                        this.picked = vec![key.clone()];
+                        this.pick_anchor = Some(key);
+                    }
+                    this.menu = Some(Menu::Files { at: e.position });
+                    cx.notify();
+                }),
+            )
             .child(
                 div()
                     .w(px(16.))
@@ -560,6 +586,206 @@ impl Workspace {
                     .text_color(status_color)
                     .child(change.kind.letter()),
             )
+    }
+}
+
+impl Workspace {
+    /// The active tab's changed file, as (staged, path).
+    fn active_change(&self) -> Option<(bool, String)> {
+        self.active_tab()
+            .filter(|t| t.commit.is_none())
+            .map(|t| (t.staged, t.path.clone()))
+    }
+
+    /// Whether a file row is drawn selected: the picked files when several are
+    /// picked (or the menu is open on them), otherwise the active tab's file.
+    fn row_selected(&self, staged: bool, path: &str) -> bool {
+        let picked = self.picked.iter().any(|(s, p)| *s == staged && p == path);
+        if self.picked.len() > 1 || matches!(self.menu, Some(Menu::Files { .. })) {
+            return picked;
+        }
+        self.active_change()
+            .is_some_and(|(s, p)| s == staged && p == path)
+    }
+
+    /// The file rows in the order they are drawn.
+    fn visible_rows(&self) -> Vec<(bool, String)> {
+        let mut rows = Vec::new();
+        if self.staged_open {
+            rows.extend(self.staged.iter().map(|c| (true, c.path.clone())));
+        }
+        if self.changes_open {
+            rows.extend(self.unstaged.iter().map(|c| (false, c.path.clone())));
+        }
+        rows
+    }
+
+    /// Starts multi-select from what is shown selected (the active tab's file).
+    fn seed_pick(&mut self) {
+        if self.picked.len() <= 1 {
+            self.picked = self.active_change().into_iter().collect();
+            if self.pick_anchor.is_none() {
+                self.pick_anchor = self.picked.first().cloned();
+            }
+        }
+    }
+
+    fn pick_toggle(&mut self, staged: bool, path: &str, cx: &mut Context<Self>) {
+        self.seed_pick();
+        let key = (staged, path.to_string());
+        if let Some(i) = self.picked.iter().position(|k| *k == key) {
+            self.picked.remove(i);
+        } else {
+            self.picked.push(key.clone());
+        }
+        self.pick_anchor = Some(key);
+        cx.notify();
+    }
+
+    fn pick_range(&mut self, staged: bool, path: &str, cx: &mut Context<Self>) {
+        self.seed_pick();
+        let rows = self.visible_rows();
+        let to = rows.iter().position(|(s, p)| *s == staged && p == path);
+        let from = self
+            .pick_anchor
+            .as_ref()
+            .and_then(|a| rows.iter().position(|r| r == a))
+            .or(to);
+        if let (Some(a), Some(b)) = (from, to) {
+            self.picked = rows[a.min(b)..=a.max(b)].to_vec();
+            if self.pick_anchor.is_none() {
+                self.pick_anchor = Some((staged, path.to_string()));
+            }
+        }
+        cx.notify();
+    }
+
+    /// The right-click menu of the picked files, while it is open.
+    pub(super) fn render_files_menu(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let Some(Menu::Files { at }) = self.menu else {
+            return None;
+        };
+        let files: Vec<FileChange> = self
+            .picked
+            .iter()
+            .filter_map(|(s, p)| self.list(*s).iter().find(|c| &c.path == p).cloned())
+            .collect();
+        if files.is_empty() {
+            return None;
+        }
+        let t = cx.theme().clone();
+        let staged: Vec<String> = files
+            .iter()
+            .filter(|c| c.staged)
+            .map(|c| c.path.clone())
+            .collect();
+        let unstaged: Vec<FileChange> = files.iter().filter(|c| !c.staged).cloned().collect();
+        let paths: Vec<String> = files.iter().map(|c| c.path.clone()).collect();
+
+        let mut items = Vec::new();
+        {
+            let files = files.clone();
+            items.push(MenuItem::new(
+                "files-open",
+                "Open Changes",
+                true,
+                move |this, _, cx| {
+                    for c in &files {
+                        this.open(c.staged, c.path.clone(), true, cx);
+                    }
+                },
+            ));
+        }
+        items.push(MenuItem::separator());
+        if !unstaged.is_empty() {
+            let p: Vec<String> = unstaged.iter().map(|c| c.path.clone()).collect();
+            items.push(MenuItem::new(
+                "files-stage",
+                "Stage Changes",
+                true,
+                move |this, _, cx| {
+                    this.picked.clear();
+                    this.stage(p.clone(), cx)
+                },
+            ));
+        }
+        if !staged.is_empty() {
+            items.push(MenuItem::new(
+                "files-unstage",
+                "Unstage Changes",
+                true,
+                move |this, _, cx| {
+                    this.picked.clear();
+                    this.unstage(staged.clone(), cx)
+                },
+            ));
+        }
+        if !unstaged.is_empty() {
+            items.push(MenuItem::new(
+                "files-discard",
+                "Discard Changes",
+                true,
+                move |this, window, cx| this.discard(unstaged.clone(), window, cx),
+            ));
+        }
+        items.push(MenuItem::separator());
+        items.push(MenuItem::new(
+            "files-reveal",
+            REVEAL_LABEL,
+            true,
+            move |this, _, cx| this.reveal(&paths, cx),
+        ));
+        Some(render_context_menu(&t, at, items, cx))
+    }
+
+    /// Shows files in the system file manager, once per folder.
+    fn reveal(&mut self, paths: &[String], cx: &mut Context<Self>) {
+        let mut seen = std::collections::HashSet::new();
+        for path in paths {
+            let abs = self.root.join(path);
+            let dir = abs.parent().map(|d| d.to_path_buf()).unwrap_or_default();
+            if !seen.insert(dir.clone()) {
+                continue;
+            }
+            if abs.exists() {
+                cx.reveal_path(&abs);
+            } else if let Some(dir) = dir.ancestors().find(|d| d.exists()) {
+                // A deleted file: open the closest folder that still exists.
+                cx.open_with_system(dir);
+            }
+        }
+    }
+
+    /// Fetch, pull and push buttons, dimmed while a git operation runs.
+    pub(super) fn remote_buttons(
+        &self,
+        prefix: &str,
+        cx: &mut Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let fg = cx.theme().fg;
+        let busy = self.busy.is_some();
+        [
+            ("fetch", "Fetch", RemoteOp::Fetch),
+            ("pull", "Pull", RemoteOp::Pull),
+            ("push", "Push", RemoteOp::Push),
+        ]
+        .into_iter()
+        .map(|(name, title, op)| {
+            icon_button(
+                SharedString::from(format!("{prefix}-{name}")),
+                name,
+                fg,
+                cx,
+                cx.listener(move |this, _, _, cx| this.remote(op, cx)),
+            )
+            .when(busy, |d| d.opacity(0.4))
+            .tooltip(tooltip(format!(
+                "{title}{}",
+                super::shortcuts::hint(title, cx)
+            )))
+            .into_any_element()
+        })
+        .collect()
     }
 }
 
@@ -602,6 +828,13 @@ pub(super) fn file_badge(name: &str) -> (String, gpui::Hsla) {
     }
 }
 
+#[cfg(target_os = "macos")]
+const REVEAL_LABEL: &str = "Reveal in Finder";
+#[cfg(target_os = "windows")]
+const REVEAL_LABEL: &str = "Reveal in File Explorer";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const REVEAL_LABEL: &str = "Open Containing Folder";
+
 type MenuAction = Box<dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>)>;
 
 /// One row of a dropdown menu.
@@ -610,6 +843,8 @@ pub(super) struct MenuItem {
     label: &'static str,
     enabled: bool,
     action: Option<MenuAction>,
+    /// Shortcut shown on the right.
+    keys: Option<String>,
 }
 
 impl MenuItem {
@@ -624,7 +859,13 @@ impl MenuItem {
             label,
             enabled,
             action: Some(Box::new(action)),
+            keys: None,
         }
+    }
+
+    pub(super) fn keys(mut self, keys: Option<String>) -> Self {
+        self.keys = keys;
+        self
     }
 
     pub(super) fn separator() -> Self {
@@ -633,6 +874,7 @@ impl MenuItem {
             label: "",
             enabled: false,
             action: None,
+            keys: None,
         }
     }
 }
@@ -644,6 +886,33 @@ pub(super) fn render_menu(
     items: Vec<MenuItem>,
     cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
+    deferred(
+        anchored()
+            .position_mode(gpui::AnchoredPositionMode::Local)
+            .offset(offset)
+            .child(menu_panel(t, items, cx)),
+    )
+    .with_priority(1)
+}
+
+/// A context menu at a window position (where the right click happened).
+pub(super) fn render_context_menu(
+    t: &Theme,
+    at: gpui::Point<gpui::Pixels>,
+    items: Vec<MenuItem>,
+    cx: &mut Context<Workspace>,
+) -> impl IntoElement {
+    deferred(
+        anchored()
+            .position_mode(gpui::AnchoredPositionMode::Window)
+            .position(at)
+            .snap_to_window()
+            .child(menu_panel(t, items, cx)),
+    )
+    .with_priority(1)
+}
+
+fn menu_panel(t: &Theme, items: Vec<MenuItem>, cx: &mut Context<Workspace>) -> gpui::Div {
     let rows = items.into_iter().enumerate().map(|(i, item)| {
         let Some(action) = item.action else {
             return div()
@@ -671,7 +940,14 @@ pub(super) fn render_menu(
                     .hover(move |s| s.bg(hover).text_color(hover_fg))
             })
             .when(!item.enabled, |d| d.text_color(t.faint))
-            .child(item.label)
+            .child(div().flex_1().child(item.label))
+            .children(item.keys.map(|k| {
+                div()
+                    .pl(px(24.))
+                    .text_size(px(12.))
+                    .text_color(t.muted)
+                    .child(k)
+            }))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .when(item.enabled, |d| {
                 d.on_click(cx.listener(move |this, _, window, cx| {
@@ -682,24 +958,16 @@ pub(super) fn render_menu(
             })
             .into_any_element()
     });
-    deferred(
-        anchored()
-            .position_mode(gpui::AnchoredPositionMode::Local)
-            .offset(offset)
-            .child(
-                div()
-                    .min_w(px(200.))
-                    .p(px(4.))
-                    .flex()
-                    .flex_col()
-                    .bg(t.panel)
-                    .text_color(t.fg)
-                    .border_1()
-                    .border_color(t.border)
-                    .rounded(px(6.))
-                    .shadow_lg()
-                    .children(rows),
-            ),
-    )
-    .with_priority(1)
+    div()
+        .min_w(px(200.))
+        .p(px(4.))
+        .flex()
+        .flex_col()
+        .bg(t.panel)
+        .text_color(t.fg)
+        .border_1()
+        .border_color(t.border)
+        .rounded(px(6.))
+        .shadow_lg()
+        .children(rows)
 }

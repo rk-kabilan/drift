@@ -42,6 +42,8 @@ actions!(
         NewWindow,
         OpenSettings,
         CheckForUpdates,
+        ToggleWordWrap,
+        ToggleGraph,
         Quit
     ]
 );
@@ -155,6 +157,15 @@ pub enum CursorLine {
 pub enum Menu {
     Commit,
     More,
+    /// The right-click menu of tab `ix`, at window position `at`.
+    Tab {
+        ix: usize,
+        at: gpui::Point<gpui::Pixels>,
+    },
+    /// The right-click menu of the selected changed files, at window position `at`.
+    Files {
+        at: gpui::Point<gpui::Pixels>,
+    },
 }
 
 /// A remote operation running in the background.
@@ -223,6 +234,21 @@ pub struct DiffState {
     pub lang: Lang,
     pub blame: Option<Blame>,
     pub cursor: Option<CursorLine>,
+    /// Where each row starts once long lines are wrapped (only while word wrap is on).
+    pub wrap: Option<super::diff_pane::WrapMap>,
+}
+
+/// A file as changed by a commit in the history graph, shown read-only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitTab {
+    pub oid: git2::Oid,
+    pub short_sha: String,
+    pub author: String,
+    pub summary: String,
+    pub time: i64,
+    /// The path before the commit, when it renamed the file.
+    pub old_path: Option<String>,
+    pub kind: ChangeKind,
 }
 
 /// An open diff. A single click opens a file in the preview tab (shown in
@@ -230,6 +256,8 @@ pub struct DiffState {
 pub struct Tab {
     pub staged: bool,
     pub path: String,
+    /// Set for a file from a commit in the history graph.
+    pub commit: Option<CommitTab>,
     pub pinned: bool,
     /// Only the active tab keeps its diff in memory; others are rebuilt when shown.
     pub diff: Option<DiffState>,
@@ -295,6 +323,23 @@ pub struct Workspace {
     picker_is_files: bool,
     pub(super) recent_commands: Vec<super::commands::Cmd>,
     pub(super) show_blame: bool,
+    /// The tab strip's scroll position, and the tab last scrolled into view.
+    pub(super) tab_scroll: gpui::ScrollHandle,
+    pub(super) tab_scrolled: std::cell::Cell<Option<usize>>,
+    /// Changed files picked with Cmd/Ctrl- or Shift-click, as (staged, path).
+    pub(super) picked: Vec<(bool, String)>,
+    /// Where a Shift-click range starts.
+    pub(super) pick_anchor: Option<(bool, String)>,
+    /// `user.name` from the git config: the author of lines not committed yet.
+    pub(super) user_name: Option<String>,
+    /// The history graph at the bottom of the changes pane.
+    pub(super) history: super::history::History,
+    /// A background fetch is running.
+    pub(super) auto_fetching: bool,
+    /// Background fetches that failed in a row; each one doubles the wait.
+    auto_fetch_failures: u32,
+    /// Why the last background fetch failed, shown in the sync tooltip.
+    pub(super) auto_fetch_error: Option<String>,
     /// Width of the changes pane, set by dragging the divider next to it.
     pub(super) sidebar_width: f32,
     /// While the divider is dragged: the pointer x and the pane width at the start.
@@ -408,6 +453,15 @@ impl Workspace {
             picker_is_files: false,
             recent_commands: Vec::new(),
             show_blame: true,
+            tab_scroll: Default::default(),
+            tab_scrolled: Default::default(),
+            picked: Vec::new(),
+            pick_anchor: None,
+            user_name: None,
+            history: Default::default(),
+            auto_fetching: false,
+            auto_fetch_failures: 0,
+            auto_fetch_error: None,
             sidebar_width: SIDEBAR_WIDTH,
             sidebar_drag: None,
             scrollbar_drag: None,
@@ -419,7 +473,7 @@ impl Workspace {
             checking_updates: false,
             focus_handle: cx.focus_handle(),
             _picker_subscription: None,
-            _tasks: vec![poll],
+            _tasks: vec![poll, Self::auto_fetch_loop(window, cx)],
             _subscriptions: subscriptions,
         };
         let repo = start.and_then(|(path, named)| match Repo::discover(&path) {
@@ -448,6 +502,8 @@ impl Workspace {
         self.active = None;
         self.staged.clear();
         self.unstaged.clear();
+        self.picked.clear();
+        self.pick_anchor = None;
         self.head = HeadInfo::default();
         self.menu = None;
         self.error = None;
@@ -459,11 +515,15 @@ impl Workspace {
         self.scroll_axis = None;
         self.scrollbar_drag = None;
         self.lock_y = 0.;
+        self.history = Default::default();
+        self.auto_fetch_failures = 0;
+        self.auto_fetch_error = None;
         self.message.update(cx, |m, cx| m.set_text("", cx));
         match repo {
             Some(repo) => {
                 self.welcome_error = None;
                 self.root = repo.root().to_path_buf();
+                self.user_name = repo.user_name();
                 self.repo = Some(repo);
                 self.recent = crate::recent::add(&self.root);
                 self.refresh(cx);
@@ -515,15 +575,25 @@ impl Workspace {
                 self.head = repo.head_info(dirty);
                 self.staged = staged;
                 self.unstaged = unstaged;
+                let (s, u) = (&self.staged, &self.unstaged);
+                self.picked
+                    .retain(|(st, p)| (if *st { s } else { u }).iter().any(|c| &c.path == p));
             }
             Err(e) => self.error = Some(format!("{e:#}")),
         }
 
         // A tab follows its file between the two groups (e.g. after staging) and
         // closes when the file has no changes left.
-        let active_key = self.active_tab().map(|t| (t.staged, t.path.clone()));
+        let active_key = self
+            .active_tab()
+            .map(|t| (t.staged, t.path.clone(), t.commit.as_ref().map(|c| c.oid)));
         let mut kept: Vec<Tab> = Vec::with_capacity(self.tabs.len());
         for mut tab in std::mem::take(&mut self.tabs) {
+            // A file from the history doesn't depend on the working tree.
+            if tab.commit.is_some() {
+                kept.push(tab);
+                continue;
+            }
             let in_list = |staged: bool| self.list(staged).iter().any(|c| c.path == tab.path);
             // A tab with unsaved edits stays put, so they are never lost silently.
             if !in_list(tab.staged) && tab.draft.is_none() {
@@ -536,7 +606,7 @@ impl Workspace {
             }
             if kept
                 .iter()
-                .any(|k| k.staged == tab.staged && k.path == tab.path)
+                .any(|k| k.commit.is_none() && k.staged == tab.staged && k.path == tab.path)
             {
                 continue;
             }
@@ -547,15 +617,17 @@ impl Workspace {
             None
         } else {
             active_key
-                .and_then(|(s, p)| {
+                .and_then(|(s, p, c)| {
+                    let oid = |t: &Tab| t.commit.as_ref().map(|c| c.oid);
                     self.tabs
                         .iter()
-                        .position(|t| t.path == p && t.staged == s)
-                        .or_else(|| self.tabs.iter().position(|t| t.path == p))
+                        .position(|t| t.path == p && t.staged == s && oid(t) == c)
+                        .or_else(|| self.tabs.iter().position(|t| t.path == p && oid(t) == c))
                 })
                 .or(Some(self.active.unwrap_or(0).min(self.tabs.len() - 1)))
         };
         self.load_active_tab();
+        self.refresh_history(cx);
 
         let message_placeholder = match super::shortcuts::label("Commit", cx) {
             Some(keys) => format!("Message ({keys} to commit on '{}')", self.head.branch),
@@ -576,11 +648,34 @@ impl Workspace {
 
     /// Shows a file's diff. Without `pin` it goes into the preview tab.
     pub fn open(&mut self, staged: bool, path: String, pin: bool, cx: &mut Context<Self>) {
-        if let Some(ix) = self
-            .tabs
-            .iter()
-            .position(|t| t.staged == staged && t.path == path)
-        {
+        self.open_tab(staged, path, None, pin, cx)
+    }
+
+    /// Shows a file as a commit in the history changed it.
+    pub fn open_commit_file(
+        &mut self,
+        commit: CommitTab,
+        path: String,
+        pin: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_tab(true, path, Some(commit), pin, cx)
+    }
+
+    fn open_tab(
+        &mut self,
+        staged: bool,
+        path: String,
+        commit: Option<CommitTab>,
+        pin: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let oid = commit.as_ref().map(|c| c.oid);
+        if let Some(ix) = self.tabs.iter().position(|t| {
+            t.path == path
+                && t.commit.as_ref().map(|c| c.oid) == oid
+                && (oid.is_some() || t.staged == staged)
+        }) {
             if pin {
                 self.tabs[ix].pinned = true;
             }
@@ -590,6 +685,7 @@ impl Workspace {
             let tab = Tab {
                 staged,
                 path,
+                commit,
                 pinned: pin,
                 diff: None,
                 saved_view: None,
@@ -680,10 +776,28 @@ impl Workspace {
     fn load_tab(&mut self, ix: usize, reset_view: bool) {
         let Some(repo) = &self.repo else { return };
         let (staged, path) = (self.tabs[ix].staged, self.tabs[ix].path.clone());
-        let Some(change) = self.list(staged).iter().find(|c| c.path == path).cloned() else {
-            return;
+        let (change, (old, new, mut left_label, mut right_label)) = if let Some(commit) =
+            &self.tabs[ix].commit
+        {
+            let change = FileChange {
+                path: path.clone(),
+                kind: commit.kind,
+                staged: true,
+            };
+            let (old, new) = repo
+                .commit_texts(commit.oid, &path, commit.old_path.as_deref())
+                .unwrap_or_default();
+            let left = format!("{}^ (parent)", commit.short_sha);
+            let right = format!("{} · {}", commit.short_sha, commit.summary);
+            (change, (old, new, left, right))
+        } else {
+            let Some(change) = self.list(staged).iter().find(|c| c.path == path).cloned() else {
+                return;
+            };
+            let texts = repo.change_texts(&change);
+            (change, texts)
         };
-        let (old, new, mut left_label, mut right_label) = repo.change_texts(&change);
+        let from_history = self.tabs[ix].commit.is_some();
         let tab = &mut self.tabs[ix];
         // Unsaved edits replace what is on disk in the view.
         let (old, new) = match &tab.draft {
@@ -721,7 +835,7 @@ impl Workspace {
             (None, None, false) => (HashSet::new(), None),
         };
         let rows = file.rows(self.layout, &expanded);
-        let blame = if change.kind == ChangeKind::Untracked || new.is_empty() {
+        let blame = if from_history || change.kind == ChangeKind::Untracked || new.is_empty() {
             None
         } else {
             repo.blame(&change.path, &new).ok()
@@ -749,6 +863,7 @@ impl Workspace {
             lang,
             blame,
             cursor,
+            wrap: None,
         });
     }
 
@@ -757,6 +872,7 @@ impl Workspace {
         for tab in &mut self.tabs {
             if let Some(d) = &mut tab.diff {
                 d.rows = d.file.rows(layout, &d.expanded);
+                d.wrap = None;
             }
         }
         cx.notify();
@@ -772,6 +888,7 @@ impl Workspace {
         if let Some(d) = self.diff_mut() {
             d.expanded.insert(id);
             d.rows = d.file.rows(layout, &d.expanded);
+            d.wrap = None;
         }
         cx.notify();
     }
@@ -812,8 +929,9 @@ impl Workspace {
                 .unwrap_or(*starts.last().unwrap())
         };
         d.cursor = cursor_for_row(&d.rows[target]);
+        let visual = d.wrap.as_ref().map_or(target, |w| w.visual_of(target));
         tab.scroll
-            .scroll_to_item(target.saturating_sub(3), gpui::ScrollStrategy::Top);
+            .scroll_to_item(visual.saturating_sub(3), gpui::ScrollStrategy::Top);
         cx.notify();
     }
 
@@ -821,6 +939,10 @@ impl Workspace {
     /// HEAD) and right the working tree for unstaged files; for staged files left
     /// is HEAD and right the index, and HEAD cannot be written.
     pub fn merge_directions(&self) -> (bool, bool) {
+        if self.active_tab().is_some_and(|t| t.commit.is_some()) {
+            // History is read-only.
+            return (false, false);
+        }
         match self.diff() {
             Some(d) if !d.binary => {
                 let to_right = true;
@@ -976,6 +1098,41 @@ impl Workspace {
             self.load_tab(ix, false);
             cx.notify();
         }
+    }
+
+    /// Closes every tab `close` picks. Tabs with unsaved edits stay open, so
+    /// edits are never thrown away by a bulk close.
+    pub fn close_tabs(&mut self, close: impl Fn(usize) -> bool, cx: &mut Context<Self>) {
+        let active = self
+            .active
+            .and_then(|a| self.tabs.get(a))
+            .map(|t| (t.staged, t.path.clone(), t.commit.as_ref().map(|c| c.oid)));
+        let mut kept_unsaved = 0;
+        let mut ix = 0;
+        self.tabs.retain(|t| {
+            let drop = close(ix);
+            ix += 1;
+            if drop && t.draft.is_some() {
+                kept_unsaved += 1;
+                return true;
+            }
+            !drop
+        });
+        self.active = active
+            .and_then(|(s, p, c)| {
+                self.tabs.iter().position(|t| {
+                    t.staged == s && t.path == p && t.commit.as_ref().map(|c| c.oid) == c
+                })
+            })
+            .or(if self.tabs.is_empty() { None } else { Some(0) });
+        if kept_unsaved > 0 {
+            self.error = Some(format!(
+                "{kept_unsaved} tab{} with unsaved edits stayed open. Save or discard them first.",
+                if kept_unsaved == 1 { "" } else { "s" }
+            ));
+        }
+        self.load_active_tab();
+        cx.notify();
     }
 
     /// Closes a tab, asking to save its unsaved edits first.
@@ -1206,6 +1363,12 @@ impl Workspace {
         }
         let root = self.root.clone();
         cx.spawn(async move |this, cx| {
+            // Let a background fetch finish first, so the two don't fight over refs.
+            while this.read_with(cx, |t, _| t.auto_fetching).unwrap_or(false) {
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
+            }
             let step = async |label: &'static str,
                               job: fn(&std::path::Path) -> anyhow::Result<()>,
                               cx: &mut gpui::AsyncApp|
@@ -1268,6 +1431,99 @@ impl Workspace {
             .ok();
         })
         .detach();
+    }
+
+    /// Fetches in the background every few seconds (see Settings). Runs one
+    /// fetch at a time, skips while another git operation runs, and waits
+    /// longer after each failure so an offline or locked remote isn't hammered.
+    fn auto_fetch_loop(window: &mut Window, cx: &mut Context<Self>) -> gpui::Task<()> {
+        cx.spawn_in(window, async move |this, cx| loop {
+            let wait = this
+                .update(cx, |this, cx| {
+                    let s = cx.global::<crate::settings::Settings>();
+                    let base = s
+                        .auto_fetch_interval
+                        .max(crate::settings::MIN_FETCH_INTERVAL);
+                    let backoff = 1u64 << this.auto_fetch_failures.min(7);
+                    // Without auto fetch, look again shortly in case it is turned on.
+                    if s.auto_fetch {
+                        (base * backoff).min(30 * 60)
+                    } else {
+                        2
+                    }
+                })
+                .unwrap_or(5);
+            cx.background_executor()
+                .timer(Duration::from_secs(wait))
+                .await;
+            let Ok(Some(root)) = this.update(cx, |this, cx| this.auto_fetch_due(cx)) else {
+                if this.update(cx, |_, _| ()).is_err() {
+                    break;
+                }
+                continue;
+            };
+            let result = cx
+                .background_spawn(async move { Repo::auto_fetch(&root) })
+                .await;
+            let alive = this
+                .update(cx, |this, cx| {
+                    this.auto_fetching = false;
+                    match result {
+                        Ok(()) => {
+                            this.auto_fetch_failures = 0;
+                            this.auto_fetch_error = None;
+                        }
+                        Err(e) => {
+                            let msg = format!("{e:#}");
+                            if this.auto_fetch_error.as_deref() != Some(msg.as_str()) {
+                                log::warn!("background fetch failed: {msg}");
+                            }
+                            this.auto_fetch_failures += 1;
+                            this.auto_fetch_error = Some(msg);
+                        }
+                    }
+                    if this.busy.is_none() {
+                        this.refresh(cx);
+                    }
+                })
+                .is_ok();
+            if !alive {
+                break;
+            }
+        })
+    }
+
+    /// The repository root, when a background fetch should start now (and
+    /// marks it as running).
+    fn auto_fetch_due(&mut self, cx: &mut Context<Self>) -> Option<PathBuf> {
+        if !cx.global::<crate::settings::Settings>().auto_fetch
+            || self.auto_fetching
+            || self.busy.is_some()
+        {
+            return None;
+        }
+        let repo = self.repo.as_ref()?;
+        if !repo.has_remote() {
+            return None;
+        }
+        self.auto_fetching = true;
+        Some(self.root.clone())
+    }
+
+    /// Turns word wrap in the diff on or off, and remembers it.
+    pub fn toggle_word_wrap(&mut self, cx: &mut Context<Self>) {
+        crate::settings::update(cx, |s| s.word_wrap = !s.word_wrap);
+        if let Some(tab) = self.active.and_then(|a| self.tabs.get_mut(a)) {
+            tab.h_scroll = 0.;
+            if let Some(d) = &mut tab.diff {
+                d.wrap = None;
+            }
+        }
+        cx.notify();
+    }
+
+    pub(super) fn word_wrap(&self, cx: &gpui::App) -> bool {
+        cx.global::<crate::settings::Settings>().word_wrap
     }
 
     // ---- pickers ----
@@ -1920,6 +2176,8 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &CheckForUpdates, window, cx| {
                 this.check_for_updates(window, cx)
             }))
+            .on_action(cx.listener(|this, _: &ToggleWordWrap, _, cx| this.toggle_word_wrap(cx)))
+            .on_action(cx.listener(|this, _: &ToggleGraph, _, cx| this.toggle_graph(cx)))
             .on_action(cx.listener(|_, _: &Quit, _, cx| cx.defer(quit)))
             .on_mouse_down(
                 gpui::MouseButton::Left,
@@ -1944,6 +2202,8 @@ impl Render for Workspace {
             .when(!show_title_bar, |d| d.pt(px(6.)))
             .child(body)
             .child(self.render_status_bar(window, cx))
+            .children(self.render_tab_menu(cx))
+            .children(self.render_files_menu(cx))
             .children(self.render_settings(window, cx))
             .children(self.picker.as_ref().map(|picker| {
                 // Click outside the picker to close it.

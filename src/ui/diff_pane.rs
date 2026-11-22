@@ -9,8 +9,9 @@ use gpui::{
 };
 
 use super::sidebar::{file_badge, status_color};
+use super::sidebar::{render_context_menu, MenuItem};
 use super::widgets::{icon, icon_button, tooltip};
-use super::workspace::{CursorLine, DiffState, MergeDirection, Workspace};
+use super::workspace::{CursorLine, DiffState, Menu, MergeDirection, Workspace};
 use crate::diff::{Layout, LineKind, Row, Side};
 use crate::syntax::{self, Lang};
 use crate::theme::{ActiveTheme as _, Theme, ThemeState};
@@ -113,7 +114,6 @@ impl Workspace {
             );
         }
 
-        let count = diff.rows.len();
         let scroll = self
             .active_tab()
             .map(|t| t.scroll.clone())
@@ -128,10 +128,12 @@ impl Workspace {
                 .map(|s| f32::from(s.width));
         }
         // Keep the horizontal scroll in range after a resize or layout change.
-        let max = self.max_h_scroll();
+        let max = self.max_h_scroll(cx);
         if let Some(tab) = self.active.and_then(|a| self.tabs.get_mut(a)) {
             tab.h_scroll = tab.h_scroll.min(max);
         }
+        self.update_wrap(cx);
+        let count = self.visual_rows();
         let width = self.diff_width.clone();
         pane.child(
             div()
@@ -144,7 +146,14 @@ impl Workspace {
                 .children(self.render_scroll_indicators(&t, cx))
                 .child(
                     gpui::canvas(
-                        move |bounds, _, _| width.set(f32::from(bounds.size.width)),
+                        move |bounds, window, _| {
+                            let w = f32::from(bounds.size.width);
+                            if width.get() != w {
+                                width.set(w);
+                                // Wrapped lines depend on the width: lay out again.
+                                window.on_next_frame(|window, _| window.refresh());
+                            }
+                        },
                         |_, _, _, _| {},
                     )
                     .absolute()
@@ -164,8 +173,49 @@ impl Workspace {
         }
     }
 
+    /// Characters that fit on one line of code, for word wrap.
+    fn wrap_cols(&self) -> Option<usize> {
+        let char_width = self.char_width?;
+        let w = self.code_width();
+        (self.diff_width.get() > 0. && char_width > 0.)
+            .then(|| ((w / char_width).floor() as usize).max(8))
+    }
+
+    /// Builds (or drops) the active diff's wrapped-row map to match the word
+    /// wrap setting and the current width.
+    fn update_wrap(&mut self, cx: &gpui::App) {
+        let cols = if self.word_wrap(cx) {
+            self.wrap_cols()
+        } else {
+            None
+        };
+        let Some(d) = self
+            .active
+            .and_then(|a| self.tabs.get_mut(a))
+            .and_then(|t| t.diff.as_mut())
+        else {
+            return;
+        };
+        match cols {
+            None => d.wrap = None,
+            Some(cols) if d.wrap.as_ref().is_some_and(|w| w.cols == cols) => {}
+            Some(cols) => d.wrap = Some(WrapMap::new(&d.rows, cols)),
+        }
+    }
+
+    /// Rows the list shows: diff rows, or wrapped lines while word wrap is on.
+    fn visual_rows(&self) -> usize {
+        self.diff().map_or(0, |d| match &d.wrap {
+            Some(w) => w.count(),
+            None => d.rows.len(),
+        })
+    }
+
     /// How far the code can scroll sideways: enough to show the end of the longest line.
-    fn max_h_scroll(&self) -> f32 {
+    fn max_h_scroll(&self, cx: &gpui::App) -> f32 {
+        if self.word_wrap(cx) {
+            return 0.;
+        }
         let Some(d) = self.diff() else { return 0. };
         let char_width = self.char_width.unwrap_or(CODE_SIZE * 0.6);
         (d.file.max_cols as f32 * char_width + 24. - self.code_width()).max(0.)
@@ -192,8 +242,19 @@ impl Workspace {
                 let fonts = (mono, ui);
                 let offset = this.active_tab().map_or(0., |t| t.h_scroll);
                 range
-                    .filter_map(|ix| diff.rows.get(ix).map(|row| (ix, row)))
-                    .map(|(ix, row)| render_row(ix, row, diff, arrows, offset, &t, &fonts, cx))
+                    .filter_map(|ix| {
+                        let (row, seg) = match &diff.wrap {
+                            Some(w) => {
+                                let (row, seg) = w.locate(ix)?;
+                                (row, Some((seg, w.cols)))
+                            }
+                            None => (ix, None),
+                        };
+                        diff.rows.get(row).map(|r| (ix, r, seg))
+                    })
+                    .map(|(ix, row, seg)| {
+                        render_row(ix, row, seg, diff, arrows, offset, &t, &fonts, cx)
+                    })
                     .collect()
             }),
         )
@@ -255,7 +316,7 @@ impl Workspace {
             gpui::ScrollDelta::Pixels(_) => dx * TRACKPAD_SPEED,
             gpui::ScrollDelta::Lines(_) => dx,
         };
-        let max = self.max_h_scroll();
+        let max = self.max_h_scroll(cx);
         if let Some(tab) = self.active.and_then(|a| self.tabs.get_mut(a)) {
             let next = (tab.h_scroll - dx).clamp(0., max);
             if next != tab.h_scroll {
@@ -271,7 +332,8 @@ impl Workspace {
             return 0.;
         };
         let view_h = f32::from(tab.scroll.0.borrow().base_handle.bounds().size.height);
-        (diff.rows.len() as f32 * ROW_HEIGHT - view_h).max(0.)
+        let rows = diff.wrap.as_ref().map_or(diff.rows.len(), |w| w.count());
+        (rows as f32 * ROW_HEIGHT - view_h).max(0.)
     }
 
     /// Scrollbars over the right and bottom edges of the diff. Drag a thumb to
@@ -300,7 +362,7 @@ impl Workspace {
             };
             bars.push(self.render_scrollbar(geometry, t, cx));
         }
-        let max_x = self.max_h_scroll();
+        let max_x = self.max_h_scroll(cx);
         if max_x > 0. && view_w > 0. {
             let code = self.code_width().max(1.);
             // Leave the corner to the vertical bar.
@@ -424,7 +486,7 @@ impl Workspace {
             base.set_offset(gpui::point(base.offset().x, px(y)));
             self.lock_y = y;
         } else {
-            let max = self.max_h_scroll();
+            let max = self.max_h_scroll(cx);
             let Some(tab) = self.active.and_then(|a| self.tabs.get_mut(a)) else {
                 return;
             };
@@ -433,27 +495,75 @@ impl Workspace {
         cx.notify();
     }
 
+    /// The right-click menu of a tab, while it is open.
+    pub(super) fn render_tab_menu(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let Some(Menu::Tab { ix, at }) = self.menu else {
+            return None;
+        };
+        if ix >= self.tabs.len() {
+            return None;
+        }
+        let t = cx.theme().clone();
+        let count = self.tabs.len();
+        let items = vec![
+            MenuItem::new("tab-close", "Close", true, move |this, window, cx| {
+                this.request_close_tab(ix, window, cx)
+            })
+            .keys(super::shortcuts::label("CloseTab", cx)),
+            MenuItem::new(
+                "tab-close-others",
+                "Close Others",
+                count > 1,
+                move |this, _, cx| this.close_tabs(|i| i != ix, cx),
+            ),
+            MenuItem::new(
+                "tab-close-right",
+                "Close to the Right",
+                ix + 1 < count,
+                move |this, _, cx| this.close_tabs(|i| i > ix, cx),
+            ),
+            MenuItem::new("tab-close-all", "Close All", true, |this, _, cx| {
+                this.close_tabs(|_| true, cx)
+            }),
+        ];
+        Some(render_context_menu(&t, at, items, cx))
+    }
+
     fn render_tabs(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let tabs = self.tabs.iter().enumerate().map(|(ix, tab)| {
             let active = self.active == Some(ix);
             let name = tab.path.rsplit('/').next().unwrap_or(&tab.path).to_string();
             let (badge, badge_color) = file_badge(&name);
-            let kind = self
-                .list(tab.staged)
-                .iter()
-                .find(|c| c.path == tab.path)
-                .map(|c| c.kind);
+            let kind = match &tab.commit {
+                Some(c) => Some(c.kind),
+                None => self
+                    .list(tab.staged)
+                    .iter()
+                    .find(|c| c.path == tab.path)
+                    .map(|c| c.kind),
+            };
+            let where_label: SharedString = match &tab.commit {
+                Some(c) => format!("({})", c.short_sha).into(),
+                None if tab.staged => "(Index)".into(),
+                None => "(Working Tree)".into(),
+            };
             let group: SharedString = format!("tab-{ix}").into();
             let hover = t.hover;
             div()
                 .id(SharedString::from(format!(
-                    "tab-{}-{}",
-                    tab.staged, tab.path
+                    "tab-{}-{}-{}",
+                    tab.staged,
+                    tab.commit
+                        .as_ref()
+                        .map(|c| c.short_sha.as_str())
+                        .unwrap_or(""),
+                    tab.path
                 )))
                 .group(group.clone())
                 .h_full()
                 .flex()
-                .flex_none()
+                // Shrinks by hiding "(Working Tree)", never below the file name.
+                .flex_shrink()
                 .items_center()
                 .gap(px(6.))
                 .pl(px(12.))
@@ -475,16 +585,26 @@ impl Workspace {
                         .text_color(badge_color)
                         .child(badge),
                 )
-                .child(div().when(!tab.pinned, |d| d.italic()).child(name))
                 .child(
                     div()
+                        .flex_none()
+                        .max_w(px(160.))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .when(!tab.pinned, |d| d.italic())
+                        .child(name),
+                )
+                .child(
+                    // Gives way first when tabs get narrow.
+                    div()
+                        .flex_shrink()
+                        .min_w_0()
+                        .max_w(px(110.))
+                        .overflow_hidden()
+                        .text_ellipsis()
                         .text_color(t.muted)
                         .when(!tab.pinned, |d| d.italic())
-                        .child(if tab.staged {
-                            "(Index)"
-                        } else {
-                            "(Working Tree)"
-                        }),
+                        .child(where_label),
                 )
                 .children(kind.map(|k| {
                     div()
@@ -556,7 +676,33 @@ impl Workspace {
                     gpui::MouseButton::Middle,
                     cx.listener(move |this, _, window, cx| this.request_close_tab(ix, window, cx)),
                 )
+                .on_mouse_down(
+                    gpui::MouseButton::Right,
+                    cx.listener(move |this, e: &gpui::MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.menu = Some(Menu::Tab { ix, at: e.position });
+                        cx.notify();
+                    }),
+                )
         });
+        // Keep the active tab in view when it changes.
+        if self.tab_scrolled.get() != self.active {
+            self.tab_scrolled.set(self.active);
+            if let Some(a) = self.active {
+                // Tabs are measured when drawn, so scroll right after this frame.
+                let h = self.tab_scroll.clone();
+                cx.spawn(async move |this, cx| {
+                    this.update(cx, |_, cx| {
+                        if reveal(&h, a) {
+                            cx.notify();
+                        }
+                    })
+                    .ok()
+                })
+                .detach();
+            }
+        }
+        let handle = self.tab_scroll.clone();
         div()
             .id("tabs")
             .h_full()
@@ -564,6 +710,21 @@ impl Workspace {
             .min_w_0()
             .flex()
             .overflow_x_scroll()
+            .track_scroll(&self.tab_scroll)
+            // A mouse wheel scrolls the tab strip sideways.
+            .on_scroll_wheel(move |e, window, cx| {
+                let d = e.delta.pixel_delta(px(20.));
+                if d.x == px(0.) && d.y != px(0.) {
+                    let max = handle.max_offset().width;
+                    let o = handle.offset();
+                    let x = (o.x + d.y).clamp(-max, px(0.));
+                    if x != o.x {
+                        handle.set_offset(gpui::point(x, o.y));
+                        window.refresh();
+                    }
+                    cx.stop_propagation();
+                }
+            })
             .children(tabs)
     }
 
@@ -574,6 +735,8 @@ impl Workspace {
         let layout = self.layout;
         let path = diff.change.path.clone();
         let staged = diff.change.staged;
+        let from_history = self.active_tab().is_some_and(|t| t.commit.is_some());
+        let wrap = self.word_wrap(cx);
         let fg = t.fg;
 
         let seg = |id: &'static str,
@@ -585,16 +748,18 @@ impl Workspace {
             div()
                 .id(id)
                 .h(px(22.))
-                .px(px(8.))
+                .w(px(28.))
                 .flex()
                 .items_center()
-                .gap(px(5.))
-                .text_size(px(12.))
+                .justify_center()
                 .cursor_pointer()
-                .when(on, |d| d.bg(t.sel).text_color(t.sel_fg))
-                .when(!on, |d| d.text_color(t.muted))
+                .when(on, |d| d.bg(t.sel))
+                .when(!on, |d| d.hover(|s| s.bg(t.hover)))
                 .child(icon(icon_name, if on { t.sel_fg } else { t.muted }))
-                .child(label)
+                .tooltip(tooltip(format!(
+                    "{label}{}",
+                    super::shortcuts::hint("ToggleLayout", cx)
+                )))
                 .on_click(cx.listener(move |this, _, _, cx| this.set_layout(target, cx)))
         };
 
@@ -691,6 +856,25 @@ impl Workspace {
                     )
                     .child(
                         icon_button(
+                            "toggle-wrap",
+                            "wrap",
+                            if wrap { t.sel_fg } else { fg },
+                            cx,
+                            cx.listener(|this, _, _, cx| this.toggle_word_wrap(cx)),
+                        )
+                        .when(wrap, |d| d.bg(t.sel))
+                        .tooltip(tooltip(format!(
+                            "{}{}",
+                            if wrap {
+                                "Word Wrap: On"
+                            } else {
+                                "Word Wrap: Off"
+                            },
+                            super::shortcuts::hint("ToggleWordWrap", cx)
+                        ))),
+                    )
+                    .child(
+                        icon_button(
                             "prev-change",
                             "arrow-up",
                             fg,
@@ -725,31 +909,52 @@ impl Workspace {
                         )
                         .tooltip(tooltip("Open File")),
                     )
-                    .child(if staged {
-                        icon_button(
-                            "unstage-current",
-                            "minus",
-                            fg,
-                            cx,
-                            cx.listener(move |this, _, _, cx| {
-                                this.unstage(vec![p_stage.clone()], cx)
-                            }),
-                        )
-                        .tooltip(tooltip("Unstage File"))
-                    } else {
-                        icon_button(
-                            "stage-current",
-                            "plus",
-                            fg,
-                            cx,
-                            cx.listener(move |this, _, _, cx| {
-                                this.stage(vec![p_stage.clone()], cx)
-                            }),
-                        )
-                        .tooltip(tooltip("Stage File"))
+                    .when(!from_history, |d| {
+                        d.child(if staged {
+                            icon_button(
+                                "unstage-current",
+                                "minus",
+                                fg,
+                                cx,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.unstage(vec![p_stage.clone()], cx)
+                                }),
+                            )
+                            .tooltip(tooltip("Unstage File"))
+                        } else {
+                            icon_button(
+                                "stage-current",
+                                "plus",
+                                fg,
+                                cx,
+                                cx.listener(move |this, _, _, cx| {
+                                    this.stage(vec![p_stage.clone()], cx)
+                                }),
+                            )
+                            .tooltip(tooltip("Stage File"))
+                        })
                     }),
             )
     }
+}
+
+/// Scrolls the tab strip the least needed to show tab `ix` whole.
+fn reveal(h: &gpui::ScrollHandle, ix: usize) -> bool {
+    let Some(tab) = h.bounds_for_item(ix) else {
+        return false;
+    };
+    let (view, o) = (h.bounds(), h.offset());
+    // Child bounds are where the tab sits when the strip isn't scrolled.
+    let x = if tab.left() + o.x < view.left() {
+        view.left() - tab.left()
+    } else if tab.right() + o.x > view.right() {
+        view.right() - tab.right()
+    } else {
+        return false;
+    };
+    let x = x.clamp(-h.max_offset().width, px(0.));
+    h.set_offset(gpui::point(x, o.y));
+    true
 }
 
 /// Width of the column between the two sides that holds the merge arrows.
@@ -880,10 +1085,141 @@ fn column_head(icon_name: &str, label: &str, t: &Theme) -> gpui::Div {
         .child(label.to_string())
 }
 
+/// Rows after word wrap: where each diff row starts in the list of wrapped
+/// lines. Four bytes per row, built only while word wrap is on; the break
+/// points of a line are found again when it is drawn.
+pub struct WrapMap {
+    pub cols: usize,
+    /// First wrapped line of each row, plus the total at the end.
+    starts: Vec<u32>,
+}
+
+impl WrapMap {
+    fn new(rows: &[Row], cols: usize) -> Self {
+        let mut starts = Vec::with_capacity(rows.len() + 1);
+        let mut at = 0u32;
+        for row in rows {
+            starts.push(at);
+            at += row_segments(row, cols) as u32;
+        }
+        starts.push(at);
+        Self { cols, starts }
+    }
+
+    pub fn count(&self) -> usize {
+        self.starts.last().copied().unwrap_or(0) as usize
+    }
+
+    /// The wrapped line where row `row` begins.
+    pub fn visual_of(&self, row: usize) -> usize {
+        self.starts
+            .get(row.min(self.starts.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(0) as usize
+    }
+
+    /// The row and segment shown on wrapped line `ix`.
+    fn locate(&self, ix: usize) -> Option<(usize, usize)> {
+        if ix >= self.count() {
+            return None;
+        }
+        let row = self.starts.partition_point(|&s| s as usize <= ix) - 1;
+        Some((row, ix - self.starts[row] as usize))
+    }
+}
+
+fn row_segments(row: &Row, cols: usize) -> usize {
+    let n = |side: Option<&Side>| side.map_or(1, |s| wrap_points(&s.text, cols).len());
+    match row {
+        Row::Pair { left, right, .. } => n(left.as_ref()).max(n(right.as_ref())),
+        Row::Line { side, .. } => n(Some(side)),
+        Row::Hunk { .. } | Row::Fold { .. } => 1,
+    }
+}
+
+/// Byte offsets where each wrapped segment of `text` starts (always at least
+/// `[0]`). Breaks after a space when one is in the segment, else mid-word.
+pub fn wrap_points(text: &str, cols: usize) -> Vec<usize> {
+    let mut starts = vec![0];
+    if cols == 0 {
+        return starts;
+    }
+    let (mut col, mut seg_start) = (0usize, 0usize);
+    let mut last_space: Option<usize> = None;
+    // Spaces of the indentation are not break points.
+    let mut seen_text = false;
+    for (i, ch) in text.char_indices() {
+        if col == cols {
+            let at = match last_space {
+                Some(p) if p > seg_start && p <= i => p,
+                _ => i,
+            };
+            starts.push(at);
+            seg_start = at;
+            col = text[at..i].chars().count();
+            last_space = None;
+        }
+        col += 1;
+        if ch == ' ' {
+            if seen_text {
+                last_space = Some(i + ch.len_utf8());
+            }
+        } else {
+            seen_text = true;
+        }
+    }
+    starts
+}
+
+/// What part of a line one wrapped segment shows.
+#[derive(Clone)]
+struct Part {
+    /// Byte range of the line's text, or `None` for the whole line.
+    range: Option<Range<usize>>,
+    /// The first segment: shows the line number and sign.
+    first: bool,
+    /// The last segment: where the blame ghost goes.
+    last: bool,
+    /// Past the end of this side's text (the other side wraps further).
+    blank: bool,
+}
+
+impl Part {
+    const WHOLE: Part = Part {
+        range: None,
+        first: true,
+        last: true,
+        blank: false,
+    };
+
+    fn of(side: Option<&Side>, seg: Option<(usize, usize)>) -> Part {
+        let (Some(side), Some((seg, cols))) = (side, seg) else {
+            return Part::WHOLE;
+        };
+        let pts = wrap_points(&side.text, cols);
+        let Some(&start) = pts.get(seg) else {
+            return Part {
+                range: Some(0..0),
+                first: false,
+                last: false,
+                blank: true,
+            };
+        };
+        let end = pts.get(seg + 1).copied().unwrap_or(side.text.len());
+        Part {
+            range: Some(start..end),
+            first: seg == 0,
+            last: seg + 1 == pts.len(),
+            blank: false,
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_row(
     ix: usize,
     row: &Row,
+    seg: Option<(usize, usize)>,
     diff: &DiffState,
     arrows: (bool, bool),
     offset: f32,
@@ -892,6 +1228,7 @@ fn render_row(
     cx: &mut Context<Workspace>,
 ) -> gpui::AnyElement {
     let (mono, ui) = fonts;
+    let first_seg = seg.is_none_or(|(s, _)| s == 0);
     let base = div()
         .id(ix)
         .h(px(ROW_HEIGHT))
@@ -946,23 +1283,39 @@ fn render_row(
                 .border_l_1()
                 .border_r_1()
                 .border_color(t.border)
-                .when_some(*block, |d, b| {
+                .when_some(block.filter(|_| first_seg), |d, b| {
                     d.child(merge_buttons(b, arrows, diff.change.staged, t, cx))
                 });
-            base.child(half(left.as_ref(), cursor_old, None, diff.lang, offset, t))
-                .child(gutter)
-                .child(half(
-                    right.as_ref(),
-                    cursor_new,
-                    blame_ghost(diff, cursor_new, right.as_ref()),
-                    diff.lang,
-                    offset,
-                    t,
-                ))
-                .when_some(click_target, |d, target| {
-                    d.on_click(cx.listener(move |this, _, _, cx| this.set_cursor(target, cx)))
-                })
-                .into_any_element()
+            let left_part = Part::of(left.as_ref(), seg);
+            let right_part = Part::of(right.as_ref(), seg);
+            let ghost = if right_part.last {
+                blame_ghost(diff, cursor_new, right.as_ref())
+            } else {
+                None
+            };
+            base.child(half(
+                left.as_ref(),
+                &left_part,
+                cursor_old,
+                None,
+                diff.lang,
+                offset,
+                t,
+            ))
+            .child(gutter)
+            .child(half(
+                right.as_ref(),
+                &right_part,
+                cursor_new,
+                ghost,
+                diff.lang,
+                offset,
+                t,
+            ))
+            .when_some(click_target, |d, target| {
+                d.on_click(cx.listener(move |this, _, _, cx| this.set_cursor(target, cx)))
+            })
+            .into_any_element()
         }
         Row::Line {
             old,
@@ -975,13 +1328,15 @@ fn render_row(
                 Some(CursorLine::Old(o)) => new.is_none() && *old == Some(o),
                 None => false,
             };
+            let part = Part::of(Some(side), seg);
             let target = new.map(CursorLine::New).or(old.map(CursorLine::Old));
-            let ghost = if new.is_some() {
+            let ghost = if new.is_some() && part.last {
                 blame_ghost(diff, is_cursor, Some(side))
             } else {
                 None
             };
             let (line_bg, sign) = kind_style(side.kind, t);
+            let first = part.first;
             let num = |n: Option<usize>| {
                 div()
                     .w(px(44.))
@@ -989,7 +1344,11 @@ fn render_row(
                     .text_right()
                     .pr(px(8.))
                     .text_color(if is_cursor { t.fg } else { t.faint })
-                    .child(n.map(|n| n.to_string()).unwrap_or_default())
+                    .child(if first {
+                        n.map(|n| n.to_string()).unwrap_or_default()
+                    } else {
+                        String::new()
+                    })
             };
             base.when_some(line_bg, |d, bg| d.bg(bg))
                 .when(is_cursor && side.kind == LineKind::Context, |d| {
@@ -1003,10 +1362,10 @@ fn render_row(
                         .flex_none()
                         .text_center()
                         .text_color(t.faint)
-                        .child(sign),
+                        .child(if first { sign } else { "" }),
                 )
-                .child(code(side, diff.lang, t, ghost, t.ghost, offset))
-                .when_some(*block, |d, b| {
+                .child(code(side, &part, diff.lang, t, ghost, t.ghost, offset))
+                .when_some(block.filter(|_| first_seg), |d, b| {
                     d.child(
                         merge_buttons(b, arrows, diff.change.staged, t, cx)
                             .flex_none()
@@ -1046,6 +1405,7 @@ fn kind_style(kind: LineKind, t: &Theme) -> (Option<Hsla>, &'static str) {
 /// One side of a side-by-side row: line number, sign and code.
 fn half(
     side: Option<&Side>,
+    part: &Part,
     is_cursor: bool,
     ghost: Option<String>,
     lang: Lang,
@@ -1077,7 +1437,11 @@ fn half(
                 .text_right()
                 .pr(px(8.))
                 .text_color(if is_cursor { t.fg } else { t.faint })
-                .child(side.line.to_string()),
+                .child(if part.first {
+                    side.line.to_string()
+                } else {
+                    String::new()
+                }),
         )
         .child(
             div()
@@ -1085,13 +1449,14 @@ fn half(
                 .flex_none()
                 .text_center()
                 .text_color(t.faint)
-                .child(sign),
+                .child(if part.first { sign } else { "" }),
         )
-        .child(code(side, lang, t, ghost, t.ghost, offset))
+        .child(code(side, part, lang, t, ghost, t.ghost, offset))
 }
 
 fn code(
     side: &Side,
+    part: &Part,
     lang: Lang,
     t: &Theme,
     ghost: Option<String>,
@@ -1103,13 +1468,38 @@ fn code(
         LineKind::Removed => Some(t.del_chg),
         LineKind::Context => None,
     };
-    let highlights = merge_highlights(
-        &side.text,
-        &syntax::highlight(&side.text, lang),
-        &side.changes,
-        chg_bg,
-        t,
-    );
+    let text = if part.blank {
+        SharedString::default()
+    } else {
+        side.text.clone().into()
+    };
+    let highlights = if part.blank {
+        Vec::new()
+    } else {
+        merge_highlights(
+            &side.text,
+            &syntax::highlight(&side.text, lang),
+            &side.changes,
+            chg_bg,
+            t,
+        )
+    };
+    // A wrapped segment: its slice of the text, with highlights moved to match.
+    let (text, highlights) = match &part.range {
+        Some(r) if !part.blank => {
+            let slice: SharedString = side.text[r.clone()].to_string().into();
+            let moved = highlights
+                .into_iter()
+                .filter_map(|(h, style)| {
+                    let (a, b) = (h.start.max(r.start), h.end.min(r.end));
+                    (a < b).then(|| (a - r.start..b - r.start, style))
+                })
+                .collect();
+            (slice, moved)
+        }
+        _ => (text, highlights),
+    };
+    let offset = if part.range.is_some() { 0. } else { offset };
     div()
         .flex_1()
         .min_w_0()
@@ -1121,7 +1511,7 @@ fn code(
             div()
                 .flex_none()
                 .when(offset > 0., |d| d.ml(px(-offset)))
-                .child(StyledText::new(side.text.clone()).with_highlights(highlights)),
+                .child(StyledText::new(text).with_highlights(highlights)),
         )
         .when_some(ghost, |d, g| {
             d.child(
@@ -1177,4 +1567,26 @@ fn merge_highlights(
         out.push((a..b, style));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrap_points;
+
+    #[test]
+    fn wraps_at_spaces_when_it_can() {
+        assert_eq!(wrap_points("short", 10), vec![0]);
+        assert_eq!(wrap_points("exactly10!", 10), vec![0]);
+        // "hello " fits, "world" moves to the next line.
+        assert_eq!(wrap_points("hello world", 8), vec![0, 6]);
+        // No space: break mid-word.
+        assert_eq!(wrap_points("abcdefghij", 4), vec![0, 4, 8]);
+        // Indentation is not a break point.
+        assert_eq!(wrap_points("      abcdefgh", 8), vec![0, 8]);
+        // Multibyte characters break on char boundaries.
+        let text = "ééééé";
+        let pts = wrap_points(text, 2);
+        assert!(pts.iter().all(|&p| text.is_char_boundary(p)));
+        assert_eq!(pts.len(), 3);
+    }
 }

@@ -12,6 +12,7 @@ macro_rules! icons {
 }
 
 static ICONS: &[(&str, &[u8])] = icons![
+    "account",
     "arrow-down",
     "arrow-left",
     "arrow-right",
@@ -24,7 +25,9 @@ static ICONS: &[(&str, &[u8])] = icons![
     "cloud",
     "commit",
     "discard",
+    "fetch",
     "file",
+    "graph",
     "inline",
     "maximize",
     "minus",
@@ -32,6 +35,8 @@ static ICONS: &[(&str, &[u8])] = icons![
     "more",
     "open",
     "plus",
+    "pull",
+    "push",
     "refresh",
     "repo",
     "search",
@@ -42,6 +47,7 @@ static ICONS: &[(&str, &[u8])] = icons![
     "sync",
     "tag",
     "update",
+    "wrap",
 ];
 
 pub struct Assets;

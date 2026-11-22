@@ -374,6 +374,74 @@ impl Workspace {
                 crate::settings::update(cx, |s| s.check_updates = !s.check_updates);
             }));
 
+        let switch = |id: &'static str, on: bool, f: fn(&mut Settings), cx: &mut Context<Self>| {
+            div()
+                .id(id)
+                .w(px(34.))
+                .h(px(18.))
+                .flex_none()
+                .rounded(px(9.))
+                .p(px(2.))
+                .flex()
+                .when(on, |d| d.justify_end())
+                .bg(if on { t.accent } else { t.border })
+                .cursor_pointer()
+                .child(div().size(px(14.)).rounded(px(7.)).bg(gpui::white()))
+                .on_click(cx.listener(move |_, _, _, cx| crate::settings::update(cx, f)))
+        };
+        let fetch_on = settings.auto_fetch;
+        let interval = settings.auto_fetch_interval;
+        let step = |id: &'static str, name: &'static str, up: bool, cx: &mut Context<Self>| {
+            let next = crate::settings::step_interval(interval, up);
+            let enabled = fetch_on && next != interval;
+            div()
+                .id(id)
+                .w(px(24.))
+                .h(px(24.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .when(enabled, |d| d.cursor_pointer().hover(|s| s.bg(t.hover)))
+                .when(!enabled, |d| d.opacity(0.4))
+                .child(super::widgets::icon(name, t.fg))
+                .when(enabled, |d| {
+                    d.on_click(cx.listener(move |_, _, _, cx| {
+                        crate::settings::update(cx, |s| s.auto_fetch_interval = next)
+                    }))
+                })
+        };
+        let interval_control = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .border_1()
+            .border_color(t.border)
+            .rounded(px(5.))
+            .overflow_hidden()
+            .child(step("fetch-interval-down", "minus", false, cx))
+            .child(
+                div()
+                    .w(px(44.))
+                    .text_center()
+                    .text_size(px(12.))
+                    .when(!fetch_on, |d| d.text_color(t.muted))
+                    .child(crate::settings::interval_label(interval)),
+            )
+            .child(step("fetch-interval-up", "plus", true, cx));
+        let fetch_toggle = switch("auto-fetch", fetch_on, |s| s.auto_fetch = !s.auto_fetch, cx);
+        let wrap_toggle = switch(
+            "word-wrap",
+            settings.word_wrap,
+            |s| s.word_wrap = !s.word_wrap,
+            cx,
+        );
+        let graph_toggle = switch(
+            "show-graph",
+            settings.show_graph,
+            |s| s.show_graph = !s.show_graph,
+            cx,
+        );
+
         let current = env!("CARGO_PKG_VERSION");
         let update = cx.global::<crate::update::Available>().0.clone();
         let (status, status_color) = if self.checking_updates {
@@ -405,6 +473,31 @@ impl Workspace {
                     "System follows your computer's light or dark mode."
                 },
                 themes,
+                t,
+            ))
+            .child(setting_row(
+                "Word wrap",
+                "Wrap long lines in diffs instead of scrolling sideways.",
+                wrap_toggle,
+                t,
+            ))
+            .child(setting_row(
+                "History graph",
+                "Show the commit graph at the bottom of the changes pane.",
+                graph_toggle,
+                t,
+            ))
+            .child(section("GIT", t))
+            .child(setting_row(
+                "Fetch automatically",
+                "Fetch from all remotes in the background, so incoming commits show up.",
+                fetch_toggle,
+                t,
+            ))
+            .child(setting_row(
+                "Fetch interval",
+                "How often to fetch. Waits longer after a failed fetch.",
+                interval_control,
                 t,
             ))
             .child(section("UPDATES", t))

@@ -2,11 +2,13 @@
 
 A fast Git desktop client written in Rust with [GPUI](https://gpui.rs), the GPU-accelerated UI framework behind Zed. It runs on macOS, Windows and Linux.
 
+Inspired by VS Code: the layout follows its Source Control view.
+
 Drift does one thing: review and commit changes. There is no editor, file search or extension system.
 
 ## What it does
 
-- **Changes pane.** Commit message box, a Commit button with a menu (Commit Staged, Commit All, Amend, Commit & Push), and **Staged Changes** / **Changes** groups. Each file shows its folder and a status letter: `M` modified, `A` added, `D` deleted, `R` renamed, `U` untracked, `C` conflicted. Hover a file to open it, discard its changes, or stage/unstage it. Hover a group header to stage, unstage or discard everything in it.
+- **Changes pane.** Commit message box, a Commit button with a menu (Commit Staged, Commit All, Amend, Commit & Push), and **Staged Changes** / **Changes** groups. Each file shows its folder and a status letter: `M` modified, `A` added, `D` deleted, `R` renamed, `U` untracked, `C` conflicted. Hover a file to open it, discard its changes, or stage/unstage it. Hover a group header to stage, unstage or discard everything in it. Cmd-click (Ctrl-click on Windows and Linux) or Shift-click picks several files; right-click for Open Changes, Stage, Unstage, Discard and Reveal in Finder (File Explorer on Windows, the file manager on Linux).
 - **Diff pane.** Side by side (HEAD or index on the left, working tree on the right) or inline, with line numbers, red/green line backgrounds, word-level highlights of what changed inside a line, light syntax colouring, and unchanged regions folded away (click a fold to expand it). Arrows jump between changes.
 - **Status bar.** Repository, branch with a `*` when the tree is dirty, commits to pull/push (click to sync), and blame for the cursor line: author, age, commit message and short hash. The same blame shows faintly at the end of the cursor line.
 - **Title bar.** Repository and branch only.
@@ -78,7 +80,7 @@ The tests run first, and the packages build only if they pass. The workflow stop
 
 Open Settings with `Cmd+,` / `Ctrl+,`, the gear in the status bar, or "Settings: Open Settings" in the command palette.
 
-- **General**: theme (System, Light or Dark; the sun/moon button in the status bar switches too) and the automatic update check.
+- **General**: theme (System, Light or Dark; the sun/moon button in the status bar switches too), word wrap, the history graph, background fetch (on by default, every 5 seconds; the interval can be changed or fetching turned off) and the automatic update check.
 - **Keyboard Shortcuts**: every action that can have a shortcut. Click Change and press the new keys (Esc cancels), Remove to leave an action without one, Reset to go back to the default. Shortcuts need Ctrl, Alt or Cmd, or a function key. Two actions with the same keys are flagged.
 
 Settings are saved to `settings` in the state folder (macOS `~/Library/Application Support/drift/`, Windows `%APPDATA%\drift\`, Linux `~/.local/state/drift/`), as `key=value` lines:
@@ -86,6 +88,10 @@ Settings are saved to `settings` in the state folder (macOS `~/Library/Applicati
 ```
 theme=dark
 check_updates=true
+word_wrap=false
+show_graph=true
+auto_fetch=true
+auto_fetch_interval=5
 key.CommandPalette=ctrl-k
 ```
 
@@ -105,5 +111,7 @@ Defaults (change them in Settings → Keyboard Shortcuts):
 | `Ctrl+Shift+N` / `Cmd+Shift+N` | New window |
 | `Ctrl+Shift+P` / `Cmd+Shift+P`, `F1` | Command palette |
 | `Ctrl+P` / `Cmd+P` | Go to file |
+| `Alt+Z` / `Option+Z` | Toggle word wrap |
+| `Ctrl+Shift+G` / `Cmd+Shift+G` | Show or hide the history graph |
 | `Ctrl+,` / `Cmd+,` | Settings |
 | `Ctrl+Q` / `Cmd+Q` | Quit |

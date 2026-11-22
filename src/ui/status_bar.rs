@@ -100,6 +100,19 @@ impl Workspace {
             ),
             (None, false, false) => (String::new(), String::new()),
         };
+        let tip = if self.busy.is_none() && !label.is_empty() {
+            let settings = cx.global::<crate::settings::Settings>();
+            match (&self.auto_fetch_error, settings.auto_fetch) {
+                (_, false) => format!("{tip}\nAuto fetch is off."),
+                (Some(e), true) => format!("{tip}\nAuto fetch failed: {e}"),
+                (None, true) => format!(
+                    "{tip}\nFetching automatically every {}.",
+                    crate::settings::interval_label(settings.auto_fetch_interval)
+                ),
+            }
+        } else {
+            tip
+        };
         if !label.is_empty() {
             bar = bar.child(
                 item("sb-sync")
@@ -123,24 +136,28 @@ impl Workspace {
         bar = bar.child(div().flex_1());
 
         if let Some(diff) = self.diff() {
-            if let (true, Some(CursorLine::New(line))) = (self.show_blame, diff.cursor) {
-                if let Some(b) = diff.blame.as_ref().and_then(|b| b.line(line)) {
+            if self.show_blame {
+                if let Some((author, when, tip)) = self.blame_for_status(diff) {
                     bar = bar.child(
                         item("sb-blame")
-                            .max_w(px(460.))
+                            .max_w(px(420.))
                             .overflow_hidden()
-                            .child(icon_sized("commit", 14., fg))
-                            .child(div().overflow_hidden().text_ellipsis().child(format!(
-                                "{}, {} · {} ({})",
-                                b.author,
-                                b.relative_time(),
-                                b.summary,
-                                b.short_sha
-                            )))
-                            .tooltip(tooltip(format!("Blame for line {line}"))),
+                            .child(icon_sized("account", 14., fg))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .child(author),
+                            )
+                            .child(
+                                div()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .opacity(0.85)
+                                    .child(when),
+                            )
+                            .tooltip(tooltip(tip)),
                     );
-                } else {
-                    bar = bar.child(item("sb-blame").opacity(0.85).child("Not committed yet"));
                 }
             }
             let pos = match diff.cursor {
@@ -154,6 +171,43 @@ impl Workspace {
             bar = bar.child(item("sb-lang").child(Lang::name_for_path(&diff.change.path)));
         }
         self.status_bar_app_items(bar, cx)
+    }
+
+    /// Who last changed the cursor line: (author, "· 3 days ago", tooltip).
+    /// For a line not committed yet that is you (`user.name`); for a file from
+    /// the history graph, the commit's author.
+    fn blame_for_status(
+        &self,
+        diff: &super::workspace::DiffState,
+    ) -> Option<(String, String, String)> {
+        if let Some(c) = self.active_tab().and_then(|t| t.commit.as_ref()) {
+            let age = crate::git::relative_time_since(c.time);
+            return Some((
+                c.author.clone(),
+                format!("· {age}"),
+                format!("{} ({}), {age}", c.summary, c.short_sha),
+            ));
+        }
+        let Some(CursorLine::New(line)) = diff.cursor else {
+            return None;
+        };
+        match diff.blame.as_ref().and_then(|b| b.line(line)) {
+            Some(b) => Some((
+                b.author.clone(),
+                format!("· {}", b.relative_time()),
+                format!(
+                    "Line {line}: {} ({}), {}",
+                    b.summary,
+                    b.short_sha,
+                    b.relative_time()
+                ),
+            )),
+            None => Some((
+                self.user_name.clone().unwrap_or_else(|| "You".into()),
+                "· Not committed yet".into(),
+                format!("Line {line} has changes that are not committed yet"),
+            )),
+        }
     }
 
     /// Update check, settings and theme: shown with or without a repository.
