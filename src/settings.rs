@@ -4,10 +4,14 @@
 //! ```text
 //! theme=dark
 //! check_updates=false
+//! word_wrap=false
+//! show_graph=true
+//! auto_fetch=true
+//! auto_fetch_interval=5
 //! key.CommandPalette=cmd-shift-p
 //! ```
 //!
-//! `theme` is `system`, `light` or `dark`. Each `key.<Action>` line replaces the
+//! `theme` is `system`, `light` or `dark`. `auto_fetch_interval` is in seconds. Each `key.<Action>` line replaces the
 //! default shortcut of that action (see [`crate::ui::shortcuts`]); an empty
 //! value removes the shortcut. Unknown lines are kept as they are.
 
@@ -18,6 +22,13 @@ use crate::theme::Appearance;
 
 const FILE: &str = "settings";
 const KEY_PREFIX: &str = "key.";
+
+/// Seconds between background fetches unless the user picks another interval.
+pub const DEFAULT_FETCH_INTERVAL: u64 = 5;
+/// Shortest interval accepted, so a typo can't hammer the remote.
+pub const MIN_FETCH_INTERVAL: u64 = 2;
+/// The steps the interval control in Settings moves through.
+pub const FETCH_INTERVALS: &[u64] = &[5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ThemeChoice {
@@ -60,6 +71,13 @@ pub struct Settings {
     pub theme: ThemeChoice,
     /// Check for a new release once a day.
     pub check_updates: bool,
+    /// Wrap long lines in the diff instead of scrolling sideways.
+    pub word_wrap: bool,
+    /// The history graph section at the bottom of the changes pane is open.
+    pub show_graph: bool,
+    /// Fetch from the remotes in the background every `auto_fetch_interval` seconds.
+    pub auto_fetch: bool,
+    pub auto_fetch_interval: u64,
     /// Shortcut overrides: action id → keystroke (`""` means no shortcut).
     pub keys: BTreeMap<String, String>,
     /// Lines this version doesn't understand, written back unchanged.
@@ -71,6 +89,10 @@ impl Default for Settings {
         Self {
             theme: ThemeChoice::System,
             check_updates: true,
+            word_wrap: false,
+            show_graph: false,
+            auto_fetch: true,
+            auto_fetch_interval: DEFAULT_FETCH_INTERVAL,
             keys: BTreeMap::new(),
             other: Vec::new(),
         }
@@ -88,6 +110,33 @@ impl Settings {
         if let Some(f) = file() {
             save_to(&f, self);
         }
+    }
+}
+
+/// "5s", "2m", "1h" for a fetch interval in seconds.
+pub fn interval_label(secs: u64) -> String {
+    match secs {
+        s if s % 3600 == 0 => format!("{}h", s / 3600),
+        s if s % 60 == 0 => format!("{}m", s / 60),
+        s => format!("{s}s"),
+    }
+}
+
+/// The next (or previous) step of [`FETCH_INTERVALS`] from `secs`.
+pub fn step_interval(secs: u64, up: bool) -> u64 {
+    if up {
+        FETCH_INTERVALS
+            .iter()
+            .copied()
+            .find(|&s| s > secs)
+            .unwrap_or(secs)
+    } else {
+        FETCH_INTERVALS
+            .iter()
+            .rev()
+            .copied()
+            .find(|&s| s < secs)
+            .unwrap_or(secs)
     }
 }
 
@@ -122,6 +171,16 @@ fn parse(text: &str) -> Settings {
             // A bad value for a known key is dropped, and the default used.
             "theme" => s.theme = ThemeChoice::from_name(value).unwrap_or_default(),
             "check_updates" => s.check_updates = value != "false",
+            "word_wrap" => s.word_wrap = value == "true",
+            "show_graph" => s.show_graph = value == "true",
+            "auto_fetch" => s.auto_fetch = value != "false",
+            "auto_fetch_interval" => {
+                s.auto_fetch_interval = value
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|&n| n >= MIN_FETCH_INTERVAL)
+                    .unwrap_or(DEFAULT_FETCH_INTERVAL)
+            }
             _ => match key.strip_prefix(KEY_PREFIX) {
                 Some(action) if !action.is_empty() => {
                     s.keys.insert(action.to_string(), value.to_string());
@@ -135,9 +194,13 @@ fn parse(text: &str) -> Settings {
 
 fn format(s: &Settings) -> String {
     let mut text = format!(
-        "theme={}\ncheck_updates={}\n",
+        "theme={}\ncheck_updates={}\nword_wrap={}\nshow_graph={}\nauto_fetch={}\nauto_fetch_interval={}\n",
         s.theme.name(),
-        s.check_updates
+        s.check_updates,
+        s.word_wrap,
+        s.show_graph,
+        s.auto_fetch,
+        s.auto_fetch_interval
     );
     for (action, keys) in &s.keys {
         text.push_str(&format!("{KEY_PREFIX}{action}={keys}\n"));
@@ -171,10 +234,12 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let text = "theme=dark\ncheck_updates=false\nkey.Refresh=f5\nkey.Quit=\nfuture=1\n";
+        let text = "theme=dark\ncheck_updates=false\nword_wrap=true\nshow_graph=true\nauto_fetch=false\nauto_fetch_interval=30\nkey.Refresh=f5\nkey.Quit=\nfuture=1\n";
         let s = parse(text);
         assert_eq!(s.theme, ThemeChoice::Dark);
         assert!(!s.check_updates);
+        assert!(s.word_wrap && s.show_graph && !s.auto_fetch);
+        assert_eq!(s.auto_fetch_interval, 30);
         assert_eq!(s.keys.get("Refresh").map(String::as_str), Some("f5"));
         assert_eq!(s.keys.get("Quit").map(String::as_str), Some(""));
         assert_eq!(parse(&format(&s)), s);
@@ -182,10 +247,23 @@ mod tests {
     }
 
     #[test]
+    fn interval_steps() {
+        assert_eq!(interval_label(5), "5s");
+        assert_eq!(interval_label(120), "2m");
+        assert_eq!(interval_label(3600), "1h");
+        assert_eq!(step_interval(5, true), 10);
+        assert_eq!(step_interval(5, false), 5);
+        assert_eq!(step_interval(7, false), 5);
+        assert_eq!(step_interval(3600, true), 3600);
+    }
+
+    #[test]
     fn bad_values_fall_back() {
-        let s = parse("theme=purple\ncheck_updates=maybe\n");
+        let s = parse("theme=purple\ncheck_updates=maybe\nauto_fetch_interval=1\n");
         assert_eq!(s.theme, ThemeChoice::System);
         assert!(s.check_updates);
+        assert!(s.auto_fetch);
+        assert_eq!(s.auto_fetch_interval, DEFAULT_FETCH_INTERVAL);
     }
 
     #[test]

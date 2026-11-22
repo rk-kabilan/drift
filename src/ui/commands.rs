@@ -99,8 +99,11 @@ commands! {
     StashStaged => "Stash Staged",
     Sync => "Sync",
     SyncRebase => "Sync (Rebase)",
+    ToggleAutoFetch => "Toggle Auto Fetch",
     ToggleBlame => "Toggle Git Blame Status Bar Item",
+    ToggleGraph => "Toggle History Graph",
     ToggleTheme => "Toggle Light/Dark Theme",
+    ToggleWordWrap => "Toggle Word Wrap",
     UndoLastCommit => "Undo Last Commit",
     UnstageAll => "Unstage All Changes",
     UnstageChanges => "Unstage Changes",
@@ -140,6 +143,7 @@ impl Cmd {
             | Cmd::RevertUnsaved
             | Cmd::SaveAll
             | Cmd::SaveChanges => "File",
+            Cmd::ToggleGraph | Cmd::ToggleWordWrap => "View",
             _ => "Git",
         }
     }
@@ -159,6 +163,8 @@ impl Cmd {
             Cmd::Pull => "Pull",
             Cmd::Push => "Push",
             Cmd::Sync => "Sync",
+            Cmd::ToggleWordWrap => "ToggleWordWrap",
+            Cmd::ToggleGraph => "ToggleGraph",
             _ => return None,
         })
     }
@@ -423,6 +429,20 @@ impl Workspace {
             Cmd::ToggleBlame => {
                 self.show_blame = !self.show_blame;
                 cx.notify();
+            }
+            Cmd::ToggleWordWrap => self.toggle_word_wrap(cx),
+            Cmd::ToggleGraph => self.toggle_graph(cx),
+            Cmd::ToggleAutoFetch => {
+                crate::settings::update(cx, |s| s.auto_fetch = !s.auto_fetch);
+                let on = cx.global::<crate::settings::Settings>().auto_fetch;
+                self.flash(
+                    if on {
+                        "Auto fetch on"
+                    } else {
+                        "Auto fetch off"
+                    },
+                    cx,
+                );
             }
 
             // ---- branches ----
@@ -1141,7 +1161,9 @@ impl Workspace {
 
     /// The (staged, path) of the file in the active tab.
     fn active_file(&self) -> Option<(bool, String)> {
-        self.active_tab().map(|t| (t.staged, t.path.clone()))
+        self.active_tab()
+            .filter(|t| t.commit.is_none())
+            .map(|t| (t.staged, t.path.clone()))
     }
 
     fn need_file(&mut self, verb: &str, cx: &mut Context<Self>) {

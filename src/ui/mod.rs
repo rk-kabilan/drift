@@ -1,5 +1,6 @@
 mod commands;
 mod diff_pane;
+mod history;
 pub mod picker;
 pub mod prompt;
 mod settings_panel;

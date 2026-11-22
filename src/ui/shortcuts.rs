@@ -49,6 +49,8 @@ shortcuts! {
     NextTab => "Next Tab", ["ctrl-tab"];
     PreviousTab => "Previous Tab", ["ctrl-shift-tab"];
     ToggleLayout => "Toggle Inline / Side by Side", [];
+    ToggleWordWrap => "Toggle Word Wrap", ["alt-z"];
+    ToggleGraph => "Toggle History Graph", ["secondary-shift-g"];
     ToggleTheme => "Toggle Light / Dark Theme", [];
     OpenRepository => "Open Repository", ["secondary-o"];
     NewWindow => "New Window", ["secondary-shift-n"];

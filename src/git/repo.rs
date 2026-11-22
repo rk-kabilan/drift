@@ -293,6 +293,48 @@ impl Repo {
         super::blame::blame(&self.repo, path, contents)
     }
 
+    /// The configured `user.name`, shown as the author of uncommitted lines.
+    pub fn user_name(&self) -> Option<String> {
+        self.repo
+            .config()
+            .ok()?
+            .get_string("user.name")
+            .ok()
+            .filter(|n| !n.trim().is_empty())
+    }
+
+    /// Whether any remote is configured (nothing to fetch otherwise).
+    pub fn has_remote(&self) -> bool {
+        self.repo.remotes().is_ok_and(|r| !r.is_empty())
+    }
+
+    // ---- history ----
+
+    /// The commits the history graph starts from; when they move, it reloads.
+    pub fn graph_tips(&self) -> Vec<git2::Oid> {
+        super::graph::tips(&self.repo)
+    }
+
+    /// The next page of the history graph.
+    pub fn graph_page(&self, cursor: &mut super::GraphCursor) -> Result<Vec<super::GraphCommit>> {
+        super::graph::page(&self.repo, cursor)
+    }
+
+    /// Files changed by a commit.
+    pub fn commit_files(&self, oid: git2::Oid) -> Result<Vec<super::CommitFile>> {
+        super::graph::commit_files(&self.repo, oid)
+    }
+
+    /// A file's text before and after a commit.
+    pub fn commit_texts(
+        &self,
+        oid: git2::Oid,
+        path: &str,
+        old_path: Option<&str>,
+    ) -> Result<(String, String)> {
+        super::graph::commit_texts(&self.repo, oid, path, old_path)
+    }
+
     // ---- writes, through the git command ----
 
     pub fn stage(&self, paths: &[String]) -> Result<()> {
@@ -535,6 +577,27 @@ impl Repo {
         run_git(root, &["fetch", "--all", "--prune"], None).map(drop)
     }
 
+    /// The background fetch: like [`Repo::fetch`], but never asks for
+    /// credentials and doesn't start a `git gc` every few seconds.
+    pub fn auto_fetch(root: &Path) -> Result<()> {
+        run_git(
+            root,
+            &[
+                "-c",
+                "gc.auto=0",
+                "-c",
+                "maintenance.auto=false",
+                "fetch",
+                "--all",
+                "--prune",
+                "--quiet",
+                "--no-show-forced-updates",
+            ],
+            None,
+        )
+        .map(drop)
+    }
+
     /// Local and remote-tracking branches, local first, each sorted by name.
     pub fn branches(&self) -> Result<Vec<BranchInfo>> {
         let mut out = Vec::new();
@@ -717,7 +780,7 @@ pub(crate) fn short(oid: &git2::Oid) -> String {
     oid.to_string()[..7].to_string()
 }
 
-fn decode(bytes: &[u8]) -> String {
+pub(super) fn decode(bytes: &[u8]) -> String {
     if bytes.iter().take(8000).any(|&b| b == 0) {
         return "(binary file)".to_string();
     }
