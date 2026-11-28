@@ -125,6 +125,32 @@ impl Workspace {
                     }),
             );
         }
+        if let Some((level, text)) = self.panel.alert.clone() {
+            let (icon, tip) = match level {
+                crate::output::Level::Error => ("error", "Show the error in Output"),
+                _ => ("warning", "Show in Output"),
+            };
+            bar = bar.child(
+                item("sb-alert")
+                    .cursor_pointer()
+                    .max_w(px(520.))
+                    .overflow_hidden()
+                    .bg(gpui::black().opacity(0.18))
+                    .child(icon_sized(icon, 14., fg))
+                    .child(
+                        div()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(text),
+                    )
+                    .tooltip(tooltip(format!(
+                        "{tip}{}",
+                        super::shortcuts::hint("ShowOutput", cx)
+                    )))
+                    .on_click(cx.listener(|this, _, window, cx| this.show_output(window, cx))),
+            );
+        }
         if let Some(note) = self.status_note {
             bar = bar.child(
                 item("sb-note")

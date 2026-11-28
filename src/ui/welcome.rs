@@ -104,11 +104,11 @@ impl Workspace {
         }
     }
 
-    /// Shows why opening failed: on the welcome screen, or in the error banner
+    /// Shows why opening failed: on the welcome screen, or in the Output panel
     /// when a repository is open.
     pub(super) fn open_failed(&mut self, message: String, cx: &mut Context<Self>) {
         if self.repo.is_some() {
-            self.error = Some(message);
+            self.report_error(message, cx);
         } else {
             self.welcome_error = Some(message);
         }
@@ -477,11 +477,7 @@ impl Workspace {
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child("Drift"),
                             )
-                            .child(
-                                div()
-                                    .text_color(t.muted)
-                                    .child("A fast Git desktop client"),
-                            ),
+                            .child(div().text_color(t.muted).child("A fast Git desktop client")),
                     ),
             )
             .children(cx.global::<crate::update::Available>().0.clone().map(|u| {

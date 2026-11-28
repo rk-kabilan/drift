@@ -933,6 +933,22 @@ impl Workspace {
                             )
                             .tooltip(tooltip("Stage File"))
                         })
+                    })
+                    .child({
+                        let open = self.panel.open;
+                        icon_button(
+                            "toggle-panel",
+                            "panel",
+                            if open { t.sel_fg } else { fg },
+                            cx,
+                            cx.listener(|this, _, window, cx| this.toggle_panel(window, cx)),
+                        )
+                        .when(open, |d| d.bg(t.sel))
+                        .tooltip(tooltip(format!(
+                            "{}{}",
+                            if open { "Hide Panel" } else { "Show Panel" },
+                            super::shortcuts::hint("TogglePanel", cx)
+                        )))
                     }),
             )
     }

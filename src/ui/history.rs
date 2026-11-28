@@ -115,7 +115,12 @@ impl Workspace {
             }
             Err(e) => {
                 h.commits.clear();
-                h.error = Some(format!("{e:#}"));
+                let message = format!("Could not read the history: {e:#}");
+                // Logged once, not on every refresh that fails the same way.
+                if h.error.as_ref() != Some(&message) {
+                    crate::output::push(crate::output::Level::Error, Some(repo.root()), &message);
+                }
+                h.error = Some(message);
             }
         }
         h.max_lane = h.commits.iter().map(max_lane).max().unwrap_or(0);
@@ -140,7 +145,9 @@ impl Workspace {
             }
             Err(e) => {
                 h.cursor.done = true;
-                h.error = Some(format!("{e:#}"));
+                let message = format!("Could not read more history: {e:#}");
+                crate::output::push(crate::output::Level::Error, Some(repo.root()), &message);
+                h.error = Some(message);
             }
         }
         cx.notify();
@@ -158,7 +165,7 @@ impl Workspace {
         } else if let Some(repo) = &self.repo {
             match repo.commit_files(oid) {
                 Ok(files) => self.history.expanded = Some((oid, files)),
-                Err(e) => self.error = Some(format!("{e:#}")),
+                Err(e) => self.report_error(format!("{e:#}"), cx),
             }
         }
         cx.notify();
@@ -228,10 +235,12 @@ impl Workspace {
         }
         let section = section.flex_1().min_h(px(120.));
         let h = &self.history;
-        if let Some(e) = &h.error {
-            if h.commits.is_empty() {
-                return section.child(note(e.clone(), t.error));
-            }
+        // The reason is in the Output panel; errors don't show in this pane.
+        if h.error.is_some() && h.commits.is_empty() {
+            return section.child(note(
+                "The history could not be read. See Output.".into(),
+                t.muted,
+            ));
         }
         if h.commits.is_empty() {
             return section.child(note("No commits yet.".into(), t.muted));

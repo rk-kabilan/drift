@@ -15,7 +15,7 @@ use crate::git::{Blame, BranchInfo, ChangeKind, FileChange, HeadInfo, Repo, TagI
 use crate::syntax::Lang;
 use crate::theme::{ActiveTheme as _, Appearance, Theme, ThemeState};
 use crate::ui::picker::{Picker, PickerEvent, PickerItem};
-use crate::ui::text_input::{TextInput, TextInputEvent};
+use crate::ui::text_input::TextInput;
 
 actions!(
     drift,
@@ -44,6 +44,15 @@ actions!(
         CheckForUpdates,
         ToggleWordWrap,
         ToggleGraph,
+        TogglePanel,
+        ToggleTerminal,
+        NewTerminal,
+        ShowOutput,
+        ClearOutput,
+        ToggleMaximizedPanel,
+        KillTerminal,
+        FocusNextTerminal,
+        FocusPreviousTerminal,
         Quit
     ]
 );
@@ -312,7 +321,8 @@ pub struct Workspace {
     pub(super) layout: Layout,
     pub(super) message: Entity<TextInput>,
     pub(super) menu: Option<Menu>,
-    pub(super) error: Option<String>,
+    /// The bottom panel: Output and Terminal tabs.
+    pub(super) panel: super::panel::Panel,
     /// Status text of the running remote operation, e.g. "Pushing…".
     pub(super) busy: Option<String>,
     /// A short note shown in the status bar after an operation finishes.
@@ -374,15 +384,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         let message = cx.new(|cx| TextInput::new("Message", cx));
-        let mut subscriptions =
-            vec![
-                cx.subscribe(&message, |this: &mut Self, _, e: &TextInputEvent, cx| {
-                    if matches!(e, TextInputEvent::Changed) {
-                        this.error = None;
-                        cx.notify();
-                    }
-                }),
-            ];
+        let mut subscriptions = Vec::new();
         subscriptions.push(cx.observe_window_activation(window, |this, window, cx| {
             if window.is_window_active() {
                 if this.repo.is_none() {
@@ -445,7 +447,7 @@ impl Workspace {
             layout: Layout::SideBySide,
             message,
             menu: None,
-            error: None,
+            panel: super::panel::Panel::new(cx),
             busy: None,
             status_note: None,
             picker: None,
@@ -506,8 +508,8 @@ impl Workspace {
         self.pick_anchor = None;
         self.head = HeadInfo::default();
         self.menu = None;
-        self.error = None;
         self.status_note = None;
+        self.panel.alert = None;
         self.picker = None;
         self.on_pick = None;
         self._picker_subscription = None;
@@ -570,6 +572,7 @@ impl Workspace {
         let Some(repo) = &self.repo else { return };
         match repo.status() {
             Ok((staged, unstaged)) => {
+                self.panel.refresh_error = None;
                 let dirty =
                     !staged.is_empty() || unstaged.iter().any(|c| c.kind != ChangeKind::Untracked);
                 self.head = repo.head_info(dirty);
@@ -579,7 +582,14 @@ impl Workspace {
                 self.picked
                     .retain(|(st, p)| (if *st { s } else { u }).iter().any(|c| &c.path == p));
             }
-            Err(e) => self.error = Some(format!("{e:#}")),
+            Err(e) => {
+                // Refresh runs every few seconds: report a failure once, not each time.
+                let message = format!("{e:#}");
+                if self.panel.refresh_error.as_ref() != Some(&message) {
+                    self.report_error(message.clone(), cx);
+                }
+                self.panel.refresh_error = Some(message);
+            }
         }
 
         // A tab follows its file between the two groups (e.g. after staging) and
@@ -965,7 +975,7 @@ impl Workspace {
         };
         let (change, shown) = (d.change.clone(), d.fingerprint);
         if direction == MergeDirection::ToLeft && change.staged {
-            self.error = Some("HEAD can't be changed from the diff.".into());
+            self.report_warning("HEAD can't be changed from the diff.", cx);
             cx.notify();
             return;
         }
@@ -984,10 +994,13 @@ impl Workspace {
             if draft.left.is_none() && draft.right.is_none() {
                 tab.draft = None;
             }
-            self.error = Some(format!(
-                "{} changed on disk. The diff was refreshed; try again.",
-                change.file_name()
-            ));
+            self.report_warning(
+                format!(
+                    "{} changed on disk. The diff was refreshed; try again.",
+                    change.file_name()
+                ),
+                cx,
+            );
             self.load_tab(ix, false);
             cx.notify();
             return;
@@ -1126,10 +1139,13 @@ impl Workspace {
             })
             .or(if self.tabs.is_empty() { None } else { Some(0) });
         if kept_unsaved > 0 {
-            self.error = Some(format!(
+            self.report_warning(
+                format!(
                 "{kept_unsaved} tab{} with unsaved edits stayed open. Save or discard them first.",
                 if kept_unsaved == 1 { "" } else { "s" }
-            ));
+            ),
+                cx,
+            );
         }
         self.load_active_tab();
         cx.notify();
@@ -1248,7 +1264,9 @@ impl Workspace {
         let Some(repo) = &self.repo else { return false };
         let result = op(repo);
         let ok = result.is_ok();
-        self.error = result.err().map(|e| format!("{e:#}"));
+        if let Err(e) = result {
+            self.report_error(format!("{e:#}"), cx);
+        }
         self.refresh(cx);
         ok
     }
@@ -1266,7 +1284,7 @@ impl Workspace {
         if abs.exists() {
             cx.open_with_system(&abs);
         } else {
-            self.error = Some(format!("{path} no longer exists in the working tree."));
+            self.report_warning(format!("{path} no longer exists in the working tree."), cx);
             cx.notify();
         }
     }
@@ -1324,17 +1342,21 @@ impl Workspace {
             return;
         }
         if self.has_unsaved() {
-            self.error = Some(UNSAVED_BEFORE_COMMIT.into());
+            self.report_warning(UNSAVED_BEFORE_COMMIT, cx);
             cx.notify();
             return;
         }
         let message = self.message.read(cx).text().to_string();
         if mode == CommitMode::Staged && self.staged.is_empty() {
-            self.error = Some(if self.unstaged.is_empty() {
-                "There are no changes to commit.".into()
-            } else {
-                "No staged changes. Stage files with +, or choose Commit All from the menu.".into()
-            });
+            self.report_warning(
+                if self.unstaged.is_empty() {
+                    "There are no changes to commit.".to_string()
+                } else {
+                    "No staged changes. Stage files with +, or choose Commit All from the menu."
+                        .to_string()
+                },
+                cx,
+            );
             cx.notify();
             return;
         }
@@ -1407,7 +1429,7 @@ impl Workspace {
                 this.busy = None;
                 match result {
                     Ok(done) => this.flash(done, cx),
-                    Err(e) => this.error = Some(format!("{e:#}")),
+                    Err(e) => this.report_error(format!("{e:#}"), cx),
                 }
                 this.refresh(cx);
             })
@@ -1648,7 +1670,7 @@ impl Workspace {
         let (branches, tags) = match loaded {
             Ok(v) => v,
             Err(e) => {
-                self.error = Some(format!("{e:#}"));
+                self.report_error(format!("{e:#}"), cx);
                 cx.notify();
                 return;
             }
@@ -1888,6 +1910,28 @@ impl Workspace {
     /// decorations, where it also carries the window controls.
     /// The draggable divider between the changes pane and the diff pane.
     /// Double-click puts it back to the default width.
+    /// The diff, and the bottom panel under it.
+    fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let maximized = self.panel.open && self.panel.maximized;
+        let mut main = div().flex_1().min_w_0().h_full().flex().flex_col();
+        if !maximized {
+            main = main.child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .child(self.render_diff_pane(window, cx)),
+            );
+        }
+        if self.panel.open {
+            if !maximized {
+                main = main.child(self.render_panel_grip(cx));
+            }
+            main = main.child(self.render_panel(window, cx));
+        }
+        main
+    }
+
     fn render_divider(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = cx.theme();
         let line = t.accent;
@@ -2066,11 +2110,12 @@ impl Render for Workspace {
                 .pb(px(6.))
                 .child(self.render_sidebar(window, cx))
                 .child(self.render_divider(cx))
-                .child(self.render_diff_pane(window, cx))
+                .child(self.render_main(window, cx))
                 .into_any_element()
         };
 
         let dragging = self.sidebar_drag.is_some();
+        let panel_dragging = self.panel.drag.is_some();
         let scrollbar_dragging = self.scrollbar_drag.is_some();
         div()
             .id("workspace")
@@ -2086,6 +2131,21 @@ impl Render for Workspace {
                         cx.notify();
                     }),
                 )
+            })
+            .when(panel_dragging, |d| {
+                d.cursor_row_resize()
+                    .on_mouse_move(cx.listener(|this, e: &gpui::MouseMoveEvent, window, cx| {
+                        if e.pressed_button != Some(gpui::MouseButton::Left) {
+                            // The button came up outside the window.
+                            this.end_panel_drag(cx);
+                        } else {
+                            this.drag_panel(f32::from(e.position.y), window, cx);
+                        }
+                    }))
+                    .on_mouse_up(
+                        gpui::MouseButton::Left,
+                        cx.listener(|this, _, _, cx| this.end_panel_drag(cx)),
+                    )
             })
             .when(dragging, |d| {
                 d.cursor_col_resize()
@@ -2178,6 +2238,31 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &ToggleWordWrap, _, cx| this.toggle_word_wrap(cx)))
             .on_action(cx.listener(|this, _: &ToggleGraph, _, cx| this.toggle_graph(cx)))
+            .on_action(
+                cx.listener(|this, _: &TogglePanel, window, cx| this.toggle_panel(window, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ToggleTerminal, window, cx| {
+                    this.toggle_terminal(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &NewTerminal, window, cx| this.new_terminal(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &ShowOutput, window, cx| this.show_output(window, cx)))
+            .on_action(cx.listener(|this, _: &ClearOutput, _, cx| this.clear_output(cx)))
+            .on_action(cx.listener(|this, _: &ToggleMaximizedPanel, window, cx| {
+                this.toggle_maximized_panel(window, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &KillTerminal, window, cx| this.kill_terminal(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &FocusNextTerminal, window, cx| {
+                this.cycle_terminal(1, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FocusPreviousTerminal, window, cx| {
+                this.cycle_terminal(-1, window, cx)
+            }))
             .on_action(cx.listener(|_, _: &Quit, _, cx| cx.defer(quit)))
             .on_mouse_down(
                 gpui::MouseButton::Left,

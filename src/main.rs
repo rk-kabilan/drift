@@ -8,9 +8,11 @@ mod diff;
 mod fuzzy;
 mod git;
 mod merge;
+mod output;
 mod recent;
 mod settings;
 mod syntax;
+mod terminal;
 mod theme;
 mod ui;
 mod update;
@@ -22,7 +24,11 @@ use gpui::{App, Application};
 use crate::theme::{pick_font, Theme, ThemeState};
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
+    let logger =
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).build();
+    // Warnings and errors also go to the Output panel.
+    log::set_max_level(logger.filter().max(log::LevelFilter::Warn));
+    let _ = log::set_boxed_logger(Box::new(output::TeeLogger { inner: logger }));
     git::limit_memory();
     // `drift <path>` opens that repository. Otherwise the repository around the
     // current folder opens if there is one, else the welcome screen shows.

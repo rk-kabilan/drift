@@ -92,10 +92,24 @@ word_wrap=false
 show_graph=true
 auto_fetch=true
 auto_fetch_interval=5
+panel_open=false
+panel_tab=output
+panel_height=240
 key.CommandPalette=ctrl-k
 ```
 
+`terminal_shell=/bin/bash -l` (a command line) picks the terminal's shell; without it the terminal starts your login shell (PowerShell on Windows).
+
 `DRIFT_THEME=light|dark` still pins the theme a window starts with.
+
+## Output and Terminal
+
+The panel under the diff has two tabs, as in VS Code:
+
+- **Output** lists the git commands Drift runs, with how long each took, and every error and warning. A failed operation opens the panel on Output and shows the message in the status bar for a few seconds; click it to jump to Output. Hints such as "No staged changes" only show in the status bar and Output. The log keeps the last 2,000 entries (at most 512 KB), and tokens in remote URLs are masked.
+- **Terminal** starts a shell in the repository root the first time you open it. `+` adds more shells; they are listed beside the terminal. While the terminal has focus, keys go to the shell except the panel shortcuts, the command palette, Go to File and Quit. Copy and paste with `Cmd+C` / `Cmd+V` on macOS and `Ctrl+Shift+C` / `Ctrl+Shift+V` elsewhere (on Windows `Ctrl+C` copies when text is selected). `Cmd+K` clears it on macOS. Scrollback keeps 1,000 lines.
+
+Drag the panel's top edge to resize it (double-click resets it); the arrow button maximizes it.
 
 ## Keyboard
 
@@ -113,6 +127,10 @@ Defaults (change them in Settings → Keyboard Shortcuts):
 | `Ctrl+P` / `Cmd+P` | Go to file |
 | `Alt+Z` / `Option+Z` | Toggle word wrap |
 | `Ctrl+Shift+G` / `Cmd+Shift+G` | Show or hide the history graph |
+| `Ctrl+J` / `Cmd+J` | Show or hide the bottom panel |
+| `` Ctrl+` `` | Open, focus or hide the terminal |
+| `` Ctrl+Shift+` `` | New terminal |
+| `Ctrl+Shift+U` / `Cmd+Shift+U` | Show Output |
 | `Ctrl+,` / `Cmd+,` | Settings |
 | `Ctrl+Q` / `Cmd+Q` | Quit |
 
