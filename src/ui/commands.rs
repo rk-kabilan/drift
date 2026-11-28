@@ -6,6 +6,7 @@ use gpui::{prelude::*, Context, PromptLevel, Window};
 
 use super::picker::{Picker, PickerItem};
 use super::workspace::{Pick, RefChoice, RefFilter, RemoteOp, Workspace};
+use crate::conflict::Resolution;
 use crate::git::{ChangeKind, CommitOptions, FileChange, Repo};
 use crate::theme::ActiveTheme as _;
 
@@ -25,6 +26,9 @@ macro_rules! commands {
 }
 
 commands! {
+    AcceptAllBoth => "Accept All Both",
+    AcceptAllCurrent => "Accept All Current",
+    AcceptAllIncoming => "Accept All Incoming",
     AddRemote => "Add Remote...",
     AddToGitignore => "Add to .gitignore",
     ApplyLatestStash => "Apply Latest Stash",
@@ -49,6 +53,7 @@ commands! {
     CommitStaged => "Commit Staged",
     CommitStagedAmend => "Commit Staged (Amend)",
     CommitStagedSignedOff => "Commit Staged (Signed Off)",
+    CompareConflict => "Compare Current Conflict",
     CreateBranch => "Create Branch...",
     CreateBranchFrom => "Create Branch From...",
     CreateTag => "Create Tag...",
@@ -71,6 +76,7 @@ commands! {
     MergeBranch => "Merge Branch...",
     NewTerminal => "Create New Terminal",
     NewWindow => "New Window",
+    NextConflict => "Next Conflict",
     NextWindowTab => "Show Next Window Tab",
     OpenAllChanges => "Open All Changes",
     OpenRecent => "Open Recent Repository...",
@@ -79,6 +85,7 @@ commands! {
     OpenStagedChanges => "Open Staged Changes",
     PopLatestStash => "Pop Latest Stash",
     PopStash => "Pop Stash...",
+    PreviousConflict => "Previous Conflict",
     PreviousWindowTab => "Show Previous Window Tab",
     PublishBranch => "Publish Branch...",
     Pull => "Pull",
@@ -164,6 +171,12 @@ impl Cmd {
             | Cmd::ToggleTerminal
             | Cmd::ToggleMaximizedPanel => "View",
             Cmd::ShowOutput | Cmd::ClearOutput => "Output",
+            Cmd::AcceptAllBoth
+            | Cmd::AcceptAllCurrent
+            | Cmd::AcceptAllIncoming
+            | Cmd::CompareConflict
+            | Cmd::NextConflict
+            | Cmd::PreviousConflict => "Merge Conflict",
             Cmd::NewTerminal | Cmd::KillTerminal => "Terminal",
             _ => "Git",
         }
@@ -368,7 +381,15 @@ impl Workspace {
             }
             Cmd::StageChanges => {
                 if let Some((false, path)) = self.active_file() {
-                    self.stage(vec![path], cx);
+                    if self
+                        .unstaged
+                        .iter()
+                        .any(|c| c.path == path && c.kind == ChangeKind::Conflicted)
+                    {
+                        self.mark_resolved(path, window, cx);
+                    } else {
+                        self.stage(vec![path], cx);
+                    }
                 } else {
                     self.need_file("stage", cx);
                 }
@@ -466,6 +487,12 @@ impl Workspace {
                 self.show_blame = !self.show_blame;
                 cx.notify();
             }
+            Cmd::AcceptAllCurrent => self.resolve_conflict(None, Resolution::Current, cx),
+            Cmd::AcceptAllIncoming => self.resolve_conflict(None, Resolution::Incoming, cx),
+            Cmd::AcceptAllBoth => self.resolve_conflict(None, Resolution::Both, cx),
+            Cmd::CompareConflict => self.toggle_conflict_compare(cx),
+            Cmd::NextConflict => self.jump_change(true, cx),
+            Cmd::PreviousConflict => self.jump_change(false, cx),
             Cmd::ToggleWordWrap => self.toggle_word_wrap(cx),
             Cmd::ToggleGraph => self.toggle_graph(cx),
             Cmd::TogglePanel => self.toggle_panel(window, cx),

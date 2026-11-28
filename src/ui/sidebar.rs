@@ -38,10 +38,13 @@ impl Workspace {
                     .min_h_0()
                     .overflow_y_scroll()
                     .pb(px(8.))
-                    .when(!self.staged.is_empty(), |d| {
-                        d.child(self.render_group(true, &t, cx))
+                    .when(self.has_conflicts(), |d| {
+                        d.child(self.render_group(Group::Merge, &t, cx))
                     })
-                    .child(self.render_group(false, &t, cx)),
+                    .when(!self.staged.is_empty(), |d| {
+                        d.child(self.render_group(Group::Staged, &t, cx))
+                    })
+                    .child(self.render_group(Group::Changes, &t, cx)),
             )
             .child(self.render_history(&t, cx))
     }
@@ -285,14 +288,22 @@ impl Workspace {
         )
     }
 
-    fn render_group(&self, staged: bool, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
-        let list = if staged { &self.staged } else { &self.unstaged };
-        let open = if staged {
-            self.staged_open
-        } else {
-            self.changes_open
+    fn render_group(&self, kind: Group, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
+        let group = kind;
+        let staged = group == Group::Staged;
+        let merge = group == Group::Merge;
+        let list: Vec<FileChange> = self.group_files(group).cloned().collect();
+        let list = &list;
+        let open = match group {
+            Group::Merge => self.merge_open,
+            Group::Staged => self.staged_open,
+            Group::Changes => self.changes_open,
         };
-        let title = if staged { "Staged Changes" } else { "Changes" };
+        let title = match group {
+            Group::Merge => "Merge Changes",
+            Group::Staged => "Staged Changes",
+            Group::Changes => "Changes",
+        };
         let paths: Vec<String> = list.iter().map(|c| c.path.clone()).collect();
         let changes: Vec<FileChange> = list.clone();
         let fg = t.fg;
@@ -314,6 +325,18 @@ impl Workspace {
                     cx.listener(move |this, _, _, cx| this.unstage(p.clone(), cx)),
                 )
                 .tooltip(tooltip("Unstage All Changes")),
+            );
+        } else if merge {
+            let p = paths.clone();
+            actions = actions.child(
+                icon_button(
+                    "stage-all-merge",
+                    "plus",
+                    fg,
+                    cx,
+                    cx.listener(move |this, _, _, cx| this.stage(p.clone(), cx)),
+                )
+                .tooltip(tooltip("Stage All Merge Changes")),
             );
         } else {
             let p = paths.clone();
@@ -343,7 +366,11 @@ impl Workspace {
         }
 
         let header = div()
-            .id(if staged { "staged-h" } else { "changes-h" })
+            .id(match group {
+                Group::Merge => "merge-h",
+                Group::Staged => "staged-h",
+                Group::Changes => "changes-h",
+            })
             .group("group-h")
             .h(px(24.))
             .flex()
@@ -356,11 +383,12 @@ impl Workspace {
             .cursor_pointer()
             .hover(move |s| s.bg(hover))
             .on_click(cx.listener(move |this, _, _, cx| {
-                if staged {
-                    this.staged_open = !this.staged_open
-                } else {
-                    this.changes_open = !this.changes_open
-                }
+                let open = match group {
+                    Group::Merge => &mut this.merge_open,
+                    Group::Staged => &mut this.staged_open,
+                    Group::Changes => &mut this.changes_open,
+                };
+                *open = !*open;
                 cx.notify();
             }))
             .child(icon(
@@ -390,7 +418,7 @@ impl Workspace {
 
         let mut group = div().flex().flex_col().child(header);
         if open {
-            if list.is_empty() && !staged {
+            if list.is_empty() && kind == Group::Changes {
                 group = group.child(
                     div()
                         .pl(px(24.))
@@ -398,7 +426,7 @@ impl Workspace {
                         .py(px(4.))
                         .text_size(px(12.))
                         .text_color(t.muted)
-                        .child(if self.staged.is_empty() {
+                        .child(if self.staged.is_empty() && !self.has_conflicts() {
                             "No changes in the working tree."
                         } else {
                             "No unstaged changes."
@@ -419,12 +447,19 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let selected = self.row_selected(change.staged, &change.path);
+        let conflicted = change.kind == ChangeKind::Conflicted;
         let (bg, fg) = if selected {
             (Some(t.sel), t.sel_fg)
+        } else if conflicted {
+            (Some(t.conflict_row), t.fg)
         } else {
             (None, t.fg)
         };
-        let hover = t.hover;
+        let hover = if conflicted {
+            t.conflict_row_hover
+        } else {
+            t.hover
+        };
         let status_color = status_color(change.kind, t);
         let row_group: SharedString = format!("row-{}-{}", change.staged, change.path).into();
         let path = change.path.clone();
@@ -461,6 +496,21 @@ impl Workspace {
                     cx.listener(move |this, _, _, cx| this.unstage(vec![p.clone()], cx)),
                 )
                 .tooltip(tooltip("Unstage Changes")),
+            );
+        } else if change.kind == ChangeKind::Conflicted {
+            // Discarding can't undo a merge; staging marks the conflicts resolved.
+            let p = path.clone();
+            actions = actions.child(
+                icon_button(
+                    SharedString::from(format!("stage-{row_group}")),
+                    "plus",
+                    fg,
+                    cx,
+                    cx.listener(move |this, _, window, cx| {
+                        this.mark_resolved(p.clone(), window, cx)
+                    }),
+                )
+                .tooltip(tooltip("Stage Changes (Mark as Resolved)")),
             );
         } else {
             let c = change.clone();
@@ -576,7 +626,35 @@ impl Workspace {
     }
 }
 
+/// A group of changed files in the changes pane, in the order drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Group {
+    /// Files with merge conflicts.
+    Merge,
+    Staged,
+    Changes,
+}
+
 impl Workspace {
+    fn has_conflicts(&self) -> bool {
+        self.unstaged
+            .iter()
+            .any(|c| c.kind == ChangeKind::Conflicted)
+    }
+
+    fn group_files(&self, group: Group) -> impl Iterator<Item = &FileChange> {
+        let list = if group == Group::Staged {
+            &self.staged
+        } else {
+            &self.unstaged
+        };
+        list.iter().filter(move |c| match group {
+            Group::Merge => c.kind == ChangeKind::Conflicted,
+            Group::Changes => c.kind != ChangeKind::Conflicted,
+            Group::Staged => true,
+        })
+    }
+
     /// The active tab's changed file, as (staged, path).
     fn active_change(&self) -> Option<(bool, String)> {
         self.active_tab()
@@ -598,11 +676,20 @@ impl Workspace {
     /// The file rows in the order they are drawn.
     fn visible_rows(&self) -> Vec<(bool, String)> {
         let mut rows = Vec::new();
+        if self.merge_open {
+            rows.extend(
+                self.group_files(Group::Merge)
+                    .map(|c| (false, c.path.clone())),
+            );
+        }
         if self.staged_open {
             rows.extend(self.staged.iter().map(|c| (true, c.path.clone())));
         }
         if self.changes_open {
-            rows.extend(self.unstaged.iter().map(|c| (false, c.path.clone())));
+            rows.extend(
+                self.group_files(Group::Changes)
+                    .map(|c| (false, c.path.clone())),
+            );
         }
         rows
     }

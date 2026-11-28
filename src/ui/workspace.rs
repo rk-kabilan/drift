@@ -10,6 +10,7 @@ use gpui::{
     UniformListScrollHandle, Window,
 };
 
+use crate::conflict::{ConflictDoc, Resolution};
 use crate::diff::{FileDiff, Layout, Row};
 use crate::git::{Blame, BranchInfo, ChangeKind, FileChange, HeadInfo, Repo, TagInfo};
 use crate::syntax::Lang;
@@ -291,6 +292,25 @@ pub struct DiffState {
     pub cursor: Option<CursorLine>,
     /// Where each row starts once long lines are wrapped (only while word wrap is on).
     pub wrap: Option<super::diff_pane::WrapMap>,
+    /// Set for a file with merge conflicts: the file is shown as one text with
+    /// its conflicts highlighted (instead of a diff), and `file` is empty.
+    pub conflict: Option<ConflictDoc>,
+}
+
+impl DiffState {
+    fn build_rows(&self, layout: Layout) -> Vec<Row> {
+        match &self.conflict {
+            Some(doc) => doc.rows(),
+            None => self.file.rows(layout, &self.expanded),
+        }
+    }
+
+    /// Characters in the longest line shown.
+    pub fn max_cols(&self) -> usize {
+        self.conflict
+            .as_ref()
+            .map_or(self.file.max_cols, |c| c.max_cols)
+    }
 }
 
 /// A file as changed by a commit in the history graph, shown read-only.
@@ -324,6 +344,9 @@ pub struct Tab {
     /// Unsaved edits made with the merge arrows. Nothing is written to the
     /// working tree or the index until the tab is saved.
     pub draft: Option<Draft>,
+    /// A conflicted file shown as a diff of its current changes against its
+    /// incoming changes, instead of the conflict view.
+    pub compare: bool,
 }
 
 /// Edited text for either side of a diff, waiting to be saved.
@@ -341,6 +364,15 @@ const BINARY: &str = "(binary file)";
 
 pub(super) const UNSAVED_BEFORE_COMMIT: &str =
     "Some diffs have unsaved edits. Save or discard them before committing.";
+
+/// ` (label)`, or nothing for an empty label.
+fn paren(label: &str) -> String {
+    if label.is_empty() {
+        String::new()
+    } else {
+        format!(" ({label})")
+    }
+}
 
 fn fingerprint(old: &str, new: &str) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -360,6 +392,11 @@ pub struct Workspace {
     pub(super) head: HeadInfo,
     pub(super) staged: Vec<FileChange>,
     pub(super) unstaged: Vec<FileChange>,
+    pub(super) merge_open: bool,
+    /// Conflicted files already reported, so the dialog shows only for new ones.
+    known_conflicts: Vec<String>,
+    /// Conflicted files to report in a dialog at the next render.
+    conflict_alert: Option<Vec<String>>,
     pub(super) staged_open: bool,
     pub(super) changes_open: bool,
     pub(super) tabs: Vec<Tab>,
@@ -497,6 +534,9 @@ impl Workspace {
             head: HeadInfo::default(),
             staged: vec![],
             unstaged: vec![],
+            merge_open: true,
+            known_conflicts: Vec::new(),
+            conflict_alert: None,
             staged_open: true,
             changes_open: true,
             tabs: vec![],
@@ -561,6 +601,8 @@ impl Workspace {
         self.active = None;
         self.staged.clear();
         self.unstaged.clear();
+        self.known_conflicts.clear();
+        self.conflict_alert = None;
         self.picked.clear();
         self.pick_anchor = None;
         self.head = HeadInfo::default();
@@ -601,6 +643,54 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Queues the merge conflict dialog when files gain conflicts (after a
+    /// merge, pull, rebase, cherry-pick or stash pop, here or in a terminal).
+    fn note_conflicts(&mut self) {
+        let now: Vec<String> = self
+            .unstaged
+            .iter()
+            .filter(|c| c.kind == ChangeKind::Conflicted)
+            .map(|c| c.path.clone())
+            .collect();
+        if now.iter().any(|p| !self.known_conflicts.contains(p)) {
+            self.conflict_alert = Some(now.clone());
+        }
+        self.known_conflicts = now;
+    }
+
+    /// Shows the queued merge conflict dialog, listing every conflicted file.
+    fn show_conflict_alert(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(files) = self.conflict_alert.take() else {
+            return;
+        };
+        const MAX: usize = 15;
+        let mut detail = format!(
+            "{} file{} {} merge conflicts:\n\n",
+            files.len(),
+            if files.len() == 1 { "" } else { "s" },
+            if files.len() == 1 { "has" } else { "have" }
+        );
+        for f in files.iter().take(MAX) {
+            detail.push_str(f);
+            detail.push('\n');
+        }
+        if files.len() > MAX {
+            detail.push_str(&format!("…and {} more\n", files.len() - MAX));
+        }
+        detail.push_str("\nResolve them in Merge Changes, then stage each file.");
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            "Merge Conflict",
+            Some(&detail),
+            &["OK"],
+            cx,
+        );
+        cx.spawn(async move |_, _| {
+            let _ = answer.await;
+        })
+        .detach();
+    }
+
     pub fn title(&self) -> String {
         if self.repo.is_none() {
             return "Drift".into();
@@ -635,6 +725,7 @@ impl Workspace {
                 self.head = repo.head_info(dirty);
                 self.staged = staged;
                 self.unstaged = unstaged;
+                self.note_conflicts();
                 let (s, u) = (&self.staged, &self.unstaged);
                 self.picked
                     .retain(|(st, p)| (if *st { s } else { u }).iter().any(|c| &c.path == p));
@@ -759,6 +850,7 @@ impl Workspace {
                 scroll: UniformListScrollHandle::new(),
                 h_scroll: 0.,
                 draft: None,
+                compare: false,
             };
             match self
                 .tabs
@@ -884,6 +976,31 @@ impl Workspace {
         };
 
         let print = fingerprint(&old, &new);
+        // A file with merge conflicts shows its working-tree text with the
+        // conflicts marked, or in compare mode a diff of the two sides.
+        let conflicted = change.kind == ChangeKind::Conflicted
+            && !change.staged
+            && !from_history
+            && new != BINARY;
+        let compare = conflicted && tab.compare;
+        let (old, new) = if compare {
+            let labels = crate::conflict::parse(&new).first().map(|c| {
+                let lines: Vec<&str> = new.lines().collect();
+                (
+                    crate::conflict::label(lines[c.start]).to_string(),
+                    crate::conflict::label(lines[c.end]).to_string(),
+                )
+            });
+            let (cur, inc) = labels.unwrap_or_default();
+            left_label = format!("Current Change{}", paren(&cur));
+            right_label = format!("Incoming Change{}", paren(&inc));
+            (
+                crate::conflict::resolve_all(&new, Resolution::Current),
+                crate::conflict::resolve_all(&new, Resolution::Incoming),
+            )
+        } else {
+            (old, new)
+        };
         if !reset_view {
             if let Some(d) = &mut tab.diff {
                 if d.fingerprint == print && d.change == change {
@@ -893,7 +1010,12 @@ impl Workspace {
                 }
             }
         }
-        let file = FileDiff::new(&old, &new);
+        let conflict = (conflicted && !compare).then(|| ConflictDoc::new(&new));
+        let file = if conflict.is_some() {
+            FileDiff::new("", "")
+        } else {
+            FileDiff::new(&old, &new)
+        };
         let saved = tab.saved_view.take();
         let (expanded, cursor) = match (tab.diff.take(), saved, reset_view) {
             (_, _, true) => (HashSet::new(), None),
@@ -901,12 +1023,17 @@ impl Workspace {
             (None, Some(view), false) => view,
             (None, None, false) => (HashSet::new(), None),
         };
-        let rows = file.rows(self.layout, &expanded);
-        let blame = if from_history || change.kind == ChangeKind::Untracked || new.is_empty() {
-            None
-        } else {
-            repo.blame(&change.path, &new).ok()
+        let rows = match &conflict {
+            Some(doc) => doc.rows(),
+            None => file.rows(self.layout, &expanded),
         };
+        let blame =
+            if from_history || conflicted || change.kind == ChangeKind::Untracked || new.is_empty()
+            {
+                None
+            } else {
+                repo.blame(&change.path, &new).ok()
+            };
         let lang = Lang::for_path(&change.path);
         let cursor = if reset_view {
             first_change_cursor(&rows)
@@ -931,6 +1058,7 @@ impl Workspace {
             blame,
             cursor,
             wrap: None,
+            conflict,
         });
     }
 
@@ -938,7 +1066,7 @@ impl Workspace {
         let layout = self.layout;
         for tab in &mut self.tabs {
             if let Some(d) = &mut tab.diff {
-                d.rows = d.file.rows(layout, &d.expanded);
+                d.rows = d.build_rows(layout);
                 d.wrap = None;
             }
         }
@@ -954,7 +1082,7 @@ impl Workspace {
         let layout = self.layout;
         if let Some(d) = self.diff_mut() {
             d.expanded.insert(id);
-            d.rows = d.file.rows(layout, &d.expanded);
+            d.rows = d.build_rows(layout);
             d.wrap = None;
         }
         cx.notify();
@@ -1011,6 +1139,8 @@ impl Workspace {
             return (false, false);
         }
         match self.diff() {
+            // A conflict is resolved with its own actions; compare mode is read-only.
+            Some(d) if d.change.kind == ChangeKind::Conflicted => (false, false),
             Some(d) if !d.binary => {
                 let to_right = true;
                 let to_left = !d.change.staged;
@@ -1084,6 +1214,149 @@ impl Workspace {
         tab.pinned = true;
         self.load_tab(ix, false);
         cx.notify();
+    }
+
+    /// The layout the active tab is drawn in: a conflict view is always one column.
+    pub fn effective_layout(&self) -> Layout {
+        match self.diff() {
+            Some(d) if d.conflict.is_some() => Layout::Inline,
+            _ => self.layout,
+        }
+    }
+
+    /// Resolves conflict `index` of the active tab (or, with `None`, every
+    /// conflict) in the tab's unsaved draft, as VS Code's Accept Current /
+    /// Incoming / Both Changes do. Nothing is written until the tab is saved.
+    pub fn resolve_conflict(
+        &mut self,
+        index: Option<usize>,
+        how: Resolution,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(ix) = self.active else { return };
+        let Some(d) = self.diff() else { return };
+        let Some(doc) = &d.conflict else {
+            self.flash("No merge conflicts in this file", cx);
+            return;
+        };
+        let target = match index {
+            Some(i) => match doc.conflicts.get(i) {
+                Some(c) => Some(c.clone()),
+                None => return,
+            },
+            None if doc.conflicts.is_empty() => {
+                self.flash("No merge conflicts left", cx);
+                return;
+            }
+            None => None,
+        };
+        let (change, shown) = (d.change.clone(), d.fingerprint);
+        let Some(repo) = &self.repo else { return };
+        let (disk_old, disk_new, _, _) = repo.change_texts(&change);
+        let tab = &mut self.tabs[ix];
+        let draft = tab.draft.get_or_insert_with(|| Draft {
+            left: None,
+            right: None,
+            base: fingerprint(&disk_old, &disk_new),
+        });
+        let old = draft.left.clone().unwrap_or_else(|| disk_old.clone());
+        let new = draft.right.clone().unwrap_or_else(|| disk_new.clone());
+        if fingerprint(&old, &new) != shown {
+            if draft.left.is_none() && draft.right.is_none() {
+                tab.draft = None;
+            }
+            self.report_warning(
+                format!(
+                    "{} changed on disk. The view was refreshed; try again.",
+                    change.file_name()
+                ),
+                cx,
+            );
+            self.load_tab(ix, false);
+            cx.notify();
+            return;
+        }
+        let text = match &target {
+            Some(c) => crate::conflict::resolve(&new, c, how),
+            None => crate::conflict::resolve_all(&new, how),
+        };
+        draft.right = (text != disk_new).then_some(text);
+        if draft.left.is_none() && draft.right.is_none() {
+            tab.draft = None;
+        }
+        tab.pinned = true;
+        self.load_tab(ix, false);
+        // Keep the cursor near the next conflict, so the next one is a key away.
+        if let Some(d) = self.diff_mut() {
+            if let (Some(c), Some(doc)) = (&target, &d.conflict) {
+                let next = doc
+                    .at_or_after(c.start + 1)
+                    .map(|i| doc.conflicts[i].start + 1);
+                d.cursor = Some(CursorLine::New(
+                    next.unwrap_or(c.start + 1).min(doc.lines.len().max(1)),
+                ));
+            }
+        }
+        cx.notify();
+    }
+
+    /// Switches a conflicted file between the conflict view and a diff of its
+    /// current changes against its incoming changes.
+    pub fn toggle_conflict_compare(&mut self, cx: &mut Context<Self>) {
+        let Some(ix) = self.active else { return };
+        let Some(tab) = self.tabs.get_mut(ix) else {
+            return;
+        };
+        let conflicted = tab
+            .diff
+            .as_ref()
+            .is_some_and(|d| d.change.kind == ChangeKind::Conflicted && !d.change.staged);
+        if !conflicted || tab.commit.is_some() {
+            self.flash("No merge conflicts in this file", cx);
+            return;
+        }
+        tab.compare = !tab.compare;
+        self.load_tab(ix, true);
+        cx.notify();
+    }
+
+    /// Stages a conflicted file to mark it resolved, saving its edits first.
+    /// Asks before staging a file that still has conflict markers.
+    pub fn mark_resolved(&mut self, path: String, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(ix) = self
+            .tabs
+            .iter()
+            .position(|t| t.commit.is_none() && !t.staged && t.path == path && t.draft.is_some())
+        {
+            if !self.write_draft(ix, cx) {
+                return;
+            }
+        }
+        let Some(repo) = &self.repo else { return };
+        let left = repo
+            .worktree_text(&path)
+            .map_or(0, |t| crate::conflict::parse(&t).len());
+        if left == 0 {
+            self.stage(vec![path], cx);
+            return;
+        }
+        let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &format!(
+                "{name} still has {left} merge conflict{}.",
+                if left == 1 { "" } else { "s" }
+            ),
+            Some("Staging it marks the conflicts resolved with the markers left in the file."),
+            &["Stage Anyway", "Cancel"],
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            if answer.await == Ok(0) {
+                this.update(cx, |this, cx| this.stage(vec![path], cx)).ok();
+            }
+        })
+        .detach();
     }
 
     pub fn has_unsaved(&self) -> bool {
@@ -2157,6 +2430,12 @@ impl Focusable for Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window.set_window_title(&self.title());
+        if self.conflict_alert.is_some() {
+            // Opened after this frame: a prompt can't be shown mid-render.
+            cx.defer_in(window, |this, window, cx| {
+                this.show_conflict_alert(window, cx)
+            });
+        }
         let client_decorated = matches!(
             window.window_decorations(),
             gpui::Decorations::Client { .. }
