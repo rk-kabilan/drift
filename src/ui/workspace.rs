@@ -31,6 +31,7 @@ actions!(
         CommandPalette,
         SwitchBranch,
         CloseTab,
+        CloseWindow,
         NextTab,
         PreviousTab,
         Fetch,
@@ -1910,6 +1911,15 @@ impl Workspace {
     /// decorations, where it also carries the window controls.
     /// The draggable divider between the changes pane and the diff pane.
     /// Double-click puts it back to the default width.
+    /// Closes this window, asking about unsaved edits first.
+    pub(super) fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.has_unsaved() {
+            self.confirm_unsaved(window, cx, |_, window, _| window.remove_window());
+        } else {
+            window.remove_window();
+        }
+    }
+
     /// The diff, and the bottom panel under it.
     fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let maximized = self.panel.open && self.panel.maximized;
@@ -2206,10 +2216,15 @@ impl Render for Workspace {
                 }),
             )
             .on_action(cx.listener(|this, _: &CloseTab, window, cx| {
-                if let Some(a) = this.active {
-                    this.request_close_tab(a, window, cx)
+                // As in VS Code: with no diff open, Cmd/Ctrl+W closes the window.
+                match this.active {
+                    Some(a) => this.request_close_tab(a, window, cx),
+                    None => this.close_window(window, cx),
                 }
             }))
+            .on_action(
+                cx.listener(|this, _: &CloseWindow, window, cx| this.close_window(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &Save, window, cx| {
                 if let Some(a) = this.active {
                     this.save_tab(a, window, cx)

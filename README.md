@@ -123,6 +123,8 @@ Defaults (change them in Settings → Keyboard Shortcuts):
 | `F5`, `Ctrl+R` / `Cmd+R` | Refresh |
 | `Ctrl+O` / `Cmd+O` | Open a repository in a new window (or bring its window forward) |
 | `Ctrl+Shift+N` / `Cmd+Shift+N` | New window |
+| `Ctrl+W` / `Cmd+W` | Close the diff tab, or the window when no diff is open |
+| `Ctrl+Shift+W` / `Cmd+Shift+W` | Close the window |
 | `Ctrl+Shift+P` / `Cmd+Shift+P`, `F1` | Command palette |
 | `Ctrl+P` / `Cmd+P` | Go to file |
 | `Alt+Z` / `Option+Z` | Toggle word wrap |

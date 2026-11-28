@@ -37,6 +37,7 @@ commands! {
     CloseRepository => "Close Repository",
     ClearOutput => "Clear Output",
     CloseAllDiffs => "Close All Diff Editors",
+    CloseWindow => "Close Window",
     ColorTheme => "Color Theme...",
     Commit => "Commit",
     CommitAmend => "Commit (Amend)",
@@ -128,6 +129,7 @@ impl Cmd {
                 | Cmd::Init
                 | Cmd::KeyboardShortcuts
                 | Cmd::NewWindow
+                | Cmd::CloseWindow
                 | Cmd::OpenRecent
                 | Cmd::OpenRepository
                 | Cmd::OpenSettings
@@ -145,6 +147,7 @@ impl Cmd {
             | Cmd::ToggleTheme => "Settings",
             Cmd::CloseRepository
             | Cmd::NewWindow
+            | Cmd::CloseWindow
             | Cmd::OpenRecent
             | Cmd::OpenRepository
             | Cmd::RevertUnsaved
@@ -168,6 +171,7 @@ impl Cmd {
             Cmd::OpenSettings => "OpenSettings",
             Cmd::ToggleTheme => "ToggleTheme",
             Cmd::NewWindow => "NewWindow",
+            Cmd::CloseWindow => "CloseWindow",
             Cmd::OpenRepository => "OpenRepository",
             Cmd::SaveChanges => "Save",
             Cmd::Commit => "Commit",
@@ -289,6 +293,7 @@ impl Workspace {
             Cmd::Init => self.new_repo_dialog(window, cx),
             Cmd::CloseRepository => self.close_repo(window, cx),
             Cmd::NewWindow => self.new_window(window, cx),
+            Cmd::CloseWindow => self.close_window(window, cx),
             Cmd::CheckForUpdates => self.check_for_updates(window, cx),
 
             // ---- settings ----

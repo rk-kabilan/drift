@@ -46,6 +46,7 @@ shortcuts! {
     Sync => "Sync", [];
     Save => "Save", ["secondary-s"];
     CloseTab => "Close Tab", ["secondary-w"];
+    CloseWindow => "Close Window", ["secondary-shift-w"];
     NextTab => "Next Tab", ["ctrl-tab"];
     PreviousTab => "Previous Tab", ["ctrl-shift-tab"];
     ToggleLayout => "Toggle Inline / Side by Side", [];
