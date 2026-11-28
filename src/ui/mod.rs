@@ -12,6 +12,7 @@ mod terminal_view;
 pub mod text_input;
 mod welcome;
 mod widgets;
+mod window_tabs;
 mod workspace;
 
 pub use workspace::open_window;

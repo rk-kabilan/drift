@@ -71,6 +71,7 @@ commands! {
     MergeBranch => "Merge Branch...",
     NewTerminal => "Create New Terminal",
     NewWindow => "New Window",
+    NextWindowTab => "Show Next Window Tab",
     OpenAllChanges => "Open All Changes",
     OpenRecent => "Open Recent Repository...",
     OpenRepository => "Open Repository...",
@@ -78,6 +79,7 @@ commands! {
     OpenStagedChanges => "Open Staged Changes",
     PopLatestStash => "Pop Latest Stash",
     PopStash => "Pop Stash...",
+    PreviousWindowTab => "Show Previous Window Tab",
     PublishBranch => "Publish Branch...",
     Pull => "Pull",
     PullRebase => "Pull (Rebase)",
@@ -130,6 +132,8 @@ impl Cmd {
                 | Cmd::KeyboardShortcuts
                 | Cmd::NewWindow
                 | Cmd::CloseWindow
+                | Cmd::NextWindowTab
+                | Cmd::PreviousWindowTab
                 | Cmd::OpenRecent
                 | Cmd::OpenRepository
                 | Cmd::OpenSettings
@@ -153,6 +157,7 @@ impl Cmd {
             | Cmd::RevertUnsaved
             | Cmd::SaveAll
             | Cmd::SaveChanges => "File",
+            Cmd::NextWindowTab | Cmd::PreviousWindowTab => "Window",
             Cmd::ToggleGraph
             | Cmd::ToggleWordWrap
             | Cmd::TogglePanel
@@ -172,6 +177,8 @@ impl Cmd {
             Cmd::ToggleTheme => "ToggleTheme",
             Cmd::NewWindow => "NewWindow",
             Cmd::CloseWindow => "CloseWindow",
+            Cmd::NextWindowTab => "NextWindowTab",
+            Cmd::PreviousWindowTab => "PreviousWindowTab",
             Cmd::OpenRepository => "OpenRepository",
             Cmd::SaveChanges => "Save",
             Cmd::Commit => "Commit",
@@ -211,7 +218,10 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let t = cx.theme().clone();
-        let available = |c: &Cmd| self.repo.is_some() || !c.needs_repo();
+        let available = |c: &Cmd| {
+            (self.repo.is_some() || !c.needs_repo())
+                && c.shortcut_id().is_none_or(super::shortcuts::available)
+        };
         let mut order: Vec<Cmd> = self
             .recent_commands
             .iter()
@@ -294,6 +304,8 @@ impl Workspace {
             Cmd::CloseRepository => self.close_repo(window, cx),
             Cmd::NewWindow => self.new_window(window, cx),
             Cmd::CloseWindow => self.close_window(window, cx),
+            Cmd::NextWindowTab => super::window_tabs::select_tab(1, window, cx),
+            Cmd::PreviousWindowTab => super::window_tabs::select_tab(-1, window, cx),
             Cmd::CheckForUpdates => self.check_for_updates(window, cx),
 
             // ---- settings ----

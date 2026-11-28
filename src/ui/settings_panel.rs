@@ -178,7 +178,7 @@ impl Workspace {
         let note = keys.filter(|k| !k.is_empty()).and_then(|k| {
             let settings = cx.global::<Settings>();
             let other = SHORTCUTS.iter().find(|o| {
-                o.id != id
+                shortcuts::can_clash(id, o.id)
                     && shortcuts::keys_for(o, settings)
                         .iter()
                         .any(|x| shortcuts::same(x, &k))
@@ -577,6 +577,7 @@ impl Workspace {
 
         let rows: Vec<AnyElement> = SHORTCUTS
             .iter()
+            .filter(|s| shortcuts::available(s.id))
             .map(|s| self.shortcut_row(s, &settings, recording == Some(s.id), t, cx))
             .collect();
 
@@ -599,7 +600,7 @@ impl Workspace {
         let custom = shortcuts::is_custom(s, settings);
         let clash = keys.iter().find_map(|k| {
             SHORTCUTS.iter().find(|o| {
-                o.id != s.id
+                shortcuts::can_clash(s.id, o.id)
                     && shortcuts::keys_for(o, settings)
                         .iter()
                         .any(|x| shortcuts::same(x, k))

@@ -24,7 +24,7 @@ macro_rules! shortcuts {
         /// A binding of `keys` to the action named `id`. `keys` must be valid.
         fn binding(id: &str, keys: &str) -> Option<KeyBinding> {
             match id {
-                $(stringify!($action) => Some(KeyBinding::new(keys, $action, None)),)*
+                $(stringify!($action) => Some(KeyBinding::new(keys, $action, context(id))),)*
                 _ => None,
             }
         }
@@ -61,11 +61,33 @@ shortcuts! {
     KillTerminal => "Kill Terminal", [];
     FocusNextTerminal => "Focus Next Terminal", ["secondary-shift-]", "ctrl-pagedown"];
     FocusPreviousTerminal => "Focus Previous Terminal", ["secondary-shift-[", "ctrl-pageup"];
+    NextWindowTab => "Show Next Window Tab", ["secondary-shift-]"];
+    PreviousWindowTab => "Show Previous Window Tab", ["secondary-shift-["];
     ToggleTheme => "Toggle Light / Dark Theme", [];
     OpenRepository => "Open Repository", ["secondary-o"];
     NewWindow => "New Window", ["secondary-shift-n"];
     CheckForUpdates => "Check for Updates", [];
     Quit => "Quit", ["secondary-q"];
+}
+
+/// Where a binding applies: everywhere, or only in a terminal. In a terminal,
+/// Cmd+Shift+] and [ move between terminals; elsewhere between window tabs.
+fn context(id: &str) -> Option<&'static str> {
+    match id {
+        "FocusNextTerminal" | "FocusPreviousTerminal" => Some("Terminal"),
+        _ => None,
+    }
+}
+
+/// Whether the action exists on this platform: only macOS has window tabs.
+pub fn available(id: &str) -> bool {
+    cfg!(target_os = "macos") || !matches!(id, "NextWindowTab" | "PreviousWindowTab")
+}
+
+/// Whether the same keys on `a` and `b` would be a clash: both exist here and
+/// apply in the same place.
+pub fn can_clash(a: &str, b: &str) -> bool {
+    a != b && available(a) && available(b) && context(a) == context(b)
 }
 
 pub fn find(id: &str) -> Option<&'static Shortcut> {
@@ -127,6 +149,7 @@ const TERMINAL_PASS_THROUGH: &[&str] = &[
 pub fn bindings(settings: &Settings) -> Vec<KeyBinding> {
     let mut out: Vec<KeyBinding> = SHORTCUTS
         .iter()
+        .filter(|s| available(s.id))
         .flat_map(|s| {
             keys_for(s, settings)
                 .into_iter()
@@ -136,7 +159,7 @@ pub fn bindings(settings: &Settings) -> Vec<KeyBinding> {
     // In a terminal, keys the shell needs (Ctrl+R, Ctrl+W, F5…) go to the
     // shell. Cmd shortcuts on macOS never reach a shell, so they stay.
     for s in SHORTCUTS {
-        if TERMINAL_PASS_THROUGH.contains(&s.id) {
+        if TERMINAL_PASS_THROUGH.contains(&s.id) || !available(s.id) {
             continue;
         }
         for k in keys_for(s, settings) {

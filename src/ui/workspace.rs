@@ -54,6 +54,8 @@ actions!(
         KillTerminal,
         FocusNextTerminal,
         FocusPreviousTerminal,
+        NextWindowTab,
+        PreviousWindowTab,
         Quit
     ]
 );
@@ -67,6 +69,9 @@ pub fn open_window(
     cx: &mut gpui::App,
 ) {
     let bounds = match cascade {
+        // A window that joins the first as a tab takes its frame; moving it
+        // would pull it out of the tab group again.
+        Some(b) if prefers_tabs() => b,
         Some(b) => gpui::Bounds::new(b.origin + gpui::point(px(28.), px(28.)), b.size),
         None => gpui::Bounds::centered(None, gpui::size(px(1280.), px(800.)), cx),
     };
@@ -80,6 +85,9 @@ pub fn open_window(
             }),
             window_min_size: Some(gpui::size(px(760.), px(420.))),
             app_id: Some("drift".into()),
+            // macOS: new windows join the first one as native tabs when the
+            // user prefers tabs (System Settings → Desktop & Dock → Prefer tabs).
+            tabbing_identifier: cfg!(target_os = "macos").then(|| "drift".to_string()),
             ..Default::default()
         },
         move |window, cx| {
@@ -100,6 +108,19 @@ pub fn open_window(
     if let Err(e) = result {
         log::error!("could not open a window: {e:#}");
     }
+}
+
+/// Whether macOS is set to open documents in tabs ("Prefer tabs when opening
+/// documents: Always" in Desktop & Dock), which makes new windows join the
+/// current one as tabs.
+fn prefers_tabs() -> bool {
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
+    std::process::Command::new("defaults")
+        .args(["read", "-g", "AppleWindowTabbingMode"])
+        .output()
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).trim() == "always")
 }
 
 /// Brings forward the window that has the repository at `root` open, if any.
@@ -417,6 +438,17 @@ impl Workspace {
             })
             .unwrap_or(true)
         });
+
+        // Shortcuts (Cmd+O, Cmd+Shift+P…) reach the workspace only from a
+        // focused element inside it. When that element goes away (a closed
+        // dialog, a hidden terminal), focus comes back here.
+        subscriptions.push(cx.on_focus_lost(window, |this, window, cx| {
+            if this.repo.is_some() {
+                window.focus(&this.message.focus_handle(cx));
+            } else {
+                window.focus(&this.focus_handle);
+            }
+        }));
 
         // Poll for outside changes (editors, terminals) while the window is in front.
         let poll = cx.spawn_in(window, async move |this, cx| loop {
@@ -2272,6 +2304,12 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|this, _: &KillTerminal, window, cx| this.kill_terminal(window, cx)),
             )
+            .on_action(|_: &NextWindowTab, window, cx| {
+                super::window_tabs::select_tab(1, window, cx)
+            })
+            .on_action(|_: &PreviousWindowTab, window, cx| {
+                super::window_tabs::select_tab(-1, window, cx)
+            })
             .on_action(cx.listener(|this, _: &FocusNextTerminal, window, cx| {
                 this.cycle_terminal(1, window, cx)
             }))
@@ -2299,6 +2337,7 @@ impl Render for Workspace {
             .when(show_title_bar, |d| {
                 d.child(self.render_title_bar(client_decorated, cx))
             })
+            .children(self.render_window_tabs(window, cx))
             .when(!show_title_bar, |d| d.pt(px(6.)))
             .child(body)
             .child(self.render_status_bar(window, cx))

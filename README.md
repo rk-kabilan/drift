@@ -25,7 +25,7 @@ cargo run --release              # opens the repository containing the current f
 cargo run --release -- ~/code/x  # or a given path
 ```
 
-Started anywhere else (or from the Dock, Start menu or app launcher), Drift shows a welcome screen: open a repository folder, clone one, create a new one, or pick one of the last ten you opened. Each repository opens in its own window; the welcome window becomes the first one you open from it. The recent list is kept in `~/Library/Application Support/drift/` on macOS, `%APPDATA%\drift\` on Windows and `~/.local/state/drift/` on Linux.
+Started anywhere else (or from the Dock, Start menu or app launcher), Drift shows a welcome screen: open a repository folder, clone one, create a new one, or pick one of the last ten you opened. Each repository opens in its own window; the welcome window becomes the first one you open from it. On macOS with "Prefer tabs when opening documents: Always" (Desktop & Dock), new windows open as tabs of the current one, with a tab bar under the title bar: click a tab to switch, its × or a middle-click to close it, `+` for a new tab. The recent list is kept in `~/Library/Application Support/drift/` on macOS, `%APPDATA%\drift\` on Windows and `~/.local/state/drift/` on Linux.
 
 **Linux** also needs the usual GPUI system libraries, for example on Debian/Ubuntu:
 
@@ -125,6 +125,7 @@ Defaults (change them in Settings → Keyboard Shortcuts):
 | `Ctrl+Shift+N` / `Cmd+Shift+N` | New window |
 | `Ctrl+W` / `Cmd+W` | Close the diff tab, or the window when no diff is open |
 | `Ctrl+Shift+W` / `Cmd+Shift+W` | Close the window |
+| `Cmd+Shift+]` / `Cmd+Shift+[` | Next / previous window tab (macOS); next / previous terminal while a terminal has focus |
 | `Ctrl+Shift+P` / `Cmd+Shift+P`, `F1` | Command palette |
 | `Ctrl+P` / `Cmd+P` | Go to file |
 | `Alt+Z` / `Option+Z` | Toggle word wrap |
