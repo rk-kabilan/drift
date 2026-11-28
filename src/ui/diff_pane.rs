@@ -12,6 +12,7 @@ use super::sidebar::{file_badge, status_color};
 use super::sidebar::{render_context_menu, MenuItem};
 use super::widgets::{icon, icon_button, tooltip};
 use super::workspace::{CursorLine, DiffState, Menu, MergeDirection, Workspace};
+use crate::conflict::Resolution;
 use crate::diff::{Layout, LineKind, Row, Side};
 use crate::syntax::{self, Lang};
 use crate::theme::{ActiveTheme as _, Theme, ThemeState};
@@ -74,7 +75,7 @@ impl Workspace {
                 .border_color(t.border)
                 .children(breadcrumbs(&diff.change.path, &t)),
         );
-        if self.layout == Layout::SideBySide {
+        if self.effective_layout() == Layout::SideBySide {
             pane = pane.child(
                 div()
                     .flex_none()
@@ -97,7 +98,10 @@ impl Workspace {
             );
         }
 
-        if diff.file.is_empty() {
+        if let Some(doc) = diff.conflict.as_ref().filter(|d| d.conflicts.is_empty()) {
+            pane = pane.child(self.render_resolved_banner(doc.lines.is_empty(), &t, cx));
+        }
+        if diff.conflict.is_none() && diff.file.is_empty() {
             let note = if diff.empty {
                 "This file is empty."
             } else {
@@ -167,6 +171,9 @@ impl Workspace {
     /// Width available to code text on one side, in pixels.
     fn code_width(&self) -> f32 {
         let w = self.diff_width.get();
+        if self.diff().is_some_and(|d| d.conflict.is_some()) {
+            return w - 44. - 16. - 12.;
+        }
         match self.layout {
             Layout::SideBySide => (w - GUTTER) / 2. - 48. - 16. - 12.,
             Layout::Inline => w - 88. - 16. - 12. - 56.,
@@ -218,7 +225,7 @@ impl Workspace {
         }
         let Some(d) = self.diff() else { return 0. };
         let char_width = self.char_width.unwrap_or(CODE_SIZE * 0.6);
-        (d.file.max_cols as f32 * char_width + 24. - self.code_width()).max(0.)
+        (d.max_cols() as f32 * char_width + 24. - self.code_width()).max(0.)
     }
 
     fn render_rows(
@@ -728,6 +735,56 @@ impl Workspace {
             .children(tabs)
     }
 
+    /// Shown over a conflicted file once no conflict markers are left in it.
+    fn render_resolved_banner(
+        &self,
+        empty: bool,
+        t: &Theme,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let path = self
+            .diff()
+            .map(|d| d.change.path.clone())
+            .unwrap_or_default();
+        let unsaved = self.active_tab().is_some_and(|t| t.draft.is_some());
+        let text = match (unsaved, empty) {
+            (_, true) => "This file has no conflict markers (deleted or emptied on one side).",
+            (true, false) => "All conflicts resolved. Save and stage the file to mark it resolved.",
+            (false, false) => "All conflicts resolved. Stage the file to mark it resolved.",
+        };
+        div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(14.))
+            .py(px(6.))
+            .bg(t.hunk)
+            .text_color(t.hunk_fg)
+            .text_size(px(12.))
+            .border_b_1()
+            .border_color(t.border)
+            .child(icon("check", t.hunk_fg))
+            .child(div().flex_1().child(text))
+            .child(
+                div()
+                    .id("mark-resolved")
+                    .h(px(22.))
+                    .px(px(10.))
+                    .flex()
+                    .items_center()
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .bg(t.accent)
+                    .text_color(t.on_accent)
+                    .hover(|s| s.opacity(0.85))
+                    .child(if unsaved { "Save & Stage" } else { "Stage" })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.mark_resolved(path.clone(), window, cx)
+                    })),
+            )
+    }
+
     fn render_diff_header(&self, t: &Theme, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(diff) = self.diff() else {
             return div();
@@ -738,6 +795,15 @@ impl Workspace {
         let from_history = self.active_tab().is_some_and(|t| t.commit.is_some());
         let wrap = self.word_wrap(cx);
         let fg = t.fg;
+        let conflicted =
+            diff.change.kind == crate::git::ChangeKind::Conflicted && !staged && !from_history;
+        let conflicts = diff.conflict.as_ref().map(|c| c.conflicts.len());
+        let comparing = conflicted && conflicts.is_none();
+        let (prev_tip, next_tip) = if conflicts.is_some() {
+            ("Previous Conflict", "Next Conflict")
+        } else {
+            ("Previous Change", "Next Change")
+        };
 
         let seg = |id: &'static str,
                    icon_name: &'static str,
@@ -786,7 +852,11 @@ impl Workspace {
                             .text_size(px(12.))
                             .text_color(t.muted)
                             .mr(px(6.))
-                            .child(format!("+{} −{}", diff.file.added, diff.file.removed)),
+                            .child(match conflicts {
+                                Some(1) => "1 conflict".to_string(),
+                                Some(n) => format!("{n} conflicts"),
+                                None => format!("+{} −{}", diff.file.added, diff.file.removed),
+                            }),
                     )
                     .when(self.active_tab().is_some_and(|t| t.draft.is_some()), |d| {
                         let button = |id: &'static str, label: &'static str, primary: bool| {
@@ -829,31 +899,50 @@ impl Workspace {
                                 })),
                         )
                     })
-                    .child(
-                        div()
-                            .flex()
-                            .mr(px(4.))
-                            .border_1()
-                            .border_color(t.border)
-                            .rounded(px(5.))
-                            .overflow_hidden()
-                            .child(seg(
-                                "seg-sbs",
+                    .when(conflicted, |d| {
+                        d.child(
+                            icon_button(
+                                "compare-conflict",
                                 "split",
-                                "Side by side",
-                                layout == Layout::SideBySide,
-                                Layout::SideBySide,
+                                if comparing { t.sel_fg } else { fg },
                                 cx,
-                            ))
-                            .child(seg(
-                                "seg-inl",
-                                "inline",
-                                "Inline",
-                                layout == Layout::Inline,
-                                Layout::Inline,
-                                cx,
-                            )),
-                    )
+                                cx.listener(|this, _, _, cx| this.toggle_conflict_compare(cx)),
+                            )
+                            .when(comparing, |d| d.bg(t.sel))
+                            .tooltip(tooltip(if comparing {
+                                "Show Conflicts"
+                            } else {
+                                "Compare Changes (Current ↔ Incoming)"
+                            })),
+                        )
+                    })
+                    .when(!conflicted, |d| {
+                        d.child(
+                            div()
+                                .flex()
+                                .mr(px(4.))
+                                .border_1()
+                                .border_color(t.border)
+                                .rounded(px(5.))
+                                .overflow_hidden()
+                                .child(seg(
+                                    "seg-sbs",
+                                    "split",
+                                    "Side by side",
+                                    layout == Layout::SideBySide,
+                                    Layout::SideBySide,
+                                    cx,
+                                ))
+                                .child(seg(
+                                    "seg-inl",
+                                    "inline",
+                                    "Inline",
+                                    layout == Layout::Inline,
+                                    Layout::Inline,
+                                    cx,
+                                )),
+                        )
+                    })
                     .child(
                         icon_button(
                             "toggle-wrap",
@@ -882,7 +971,7 @@ impl Workspace {
                             cx.listener(|this, _, _, cx| this.jump_change(false, cx)),
                         )
                         .tooltip(tooltip(format!(
-                            "Previous Change{}",
+                            "{prev_tip}{}",
                             super::shortcuts::hint("PreviousChange", cx)
                         ))),
                     )
@@ -895,7 +984,7 @@ impl Workspace {
                             cx.listener(|this, _, _, cx| this.jump_change(true, cx)),
                         )
                         .tooltip(tooltip(format!(
-                            "Next Change{}",
+                            "{next_tip}{}",
                             super::shortcuts::hint("NextChange", cx)
                         ))),
                     )
@@ -909,7 +998,22 @@ impl Workspace {
                         )
                         .tooltip(tooltip("Open File")),
                     )
-                    .when(!from_history, |d| {
+                    .when(conflicted, |d| {
+                        let p = p_stage.clone();
+                        d.child(
+                            icon_button(
+                                "resolve-current",
+                                "check",
+                                fg,
+                                cx,
+                                cx.listener(move |this, _, window, cx| {
+                                    this.mark_resolved(p.clone(), window, cx)
+                                }),
+                            )
+                            .tooltip(tooltip("Mark as Resolved (Stage File)")),
+                        )
+                    })
+                    .when(!from_history && !conflicted, |d| {
                         d.child(if staged {
                             icon_button(
                                 "unstage-current",
@@ -1149,7 +1253,7 @@ fn row_segments(row: &Row, cols: usize) -> usize {
     match row {
         Row::Pair { left, right, .. } => n(left.as_ref()).max(n(right.as_ref())),
         Row::Line { side, .. } => n(Some(side)),
-        Row::Hunk { .. } | Row::Fold { .. } => 1,
+        Row::Hunk { .. } | Row::Fold { .. } | Row::Conflict { .. } => 1,
     }
 }
 
@@ -1262,6 +1366,7 @@ fn render_row(
             .text_size(px(12.))
             .child(header.clone())
             .into_any_element(),
+        Row::Conflict { index } => conflict_actions(*index, base, ui, t, cx).into_any_element(),
         Row::Fold { id, hidden } => {
             let id = *id;
             let border = t.border;
@@ -1346,11 +1451,16 @@ fn render_row(
             };
             let part = Part::of(Some(side), seg);
             let target = new.map(CursorLine::New).or(old.map(CursorLine::Old));
-            let ghost = if new.is_some() && part.last {
+            let ghost = if !part.last {
+                None
+            } else if let Some(note) = marker_note(side.kind) {
+                Some(note.to_string())
+            } else if new.is_some() {
                 blame_ghost(diff, is_cursor, Some(side))
             } else {
                 None
             };
+            let conflict_view = diff.conflict.is_some();
             let (line_bg, sign) = kind_style(side.kind, t);
             let first = part.first;
             let num = |n: Option<usize>| {
@@ -1370,7 +1480,7 @@ fn render_row(
                 .when(is_cursor && side.kind == LineKind::Context, |d| {
                     d.bg(t.cursor_line)
                 })
-                .child(num(*old))
+                .when(!conflict_view, |d| d.child(num(*old)))
                 .child(num(*new))
                 .child(
                     div()
@@ -1396,6 +1506,74 @@ fn render_row(
     }
 }
 
+/// The note after a conflict marker, as VS Code shows it.
+fn marker_note(kind: LineKind) -> Option<&'static str> {
+    match kind {
+        LineKind::CurrentMarker => Some("(Current Change)"),
+        LineKind::IncomingMarker => Some("(Incoming Change)"),
+        _ => None,
+    }
+}
+
+/// The row of actions above a merge conflict, like VS Code's CodeLens:
+/// Accept Current Change | Accept Incoming Change | Accept Both Changes | Compare Changes.
+fn conflict_actions(
+    index: usize,
+    base: gpui::Stateful<gpui::Div>,
+    ui: &SharedString,
+    t: &Theme,
+    cx: &mut Context<Workspace>,
+) -> gpui::Stateful<gpui::Div> {
+    let link = |id: &'static str,
+                label: &'static str,
+                how: Option<Resolution>,
+                cx: &mut Context<Workspace>| {
+        let (muted, hover) = (t.muted, t.accent);
+        div()
+            .id(SharedString::from(format!("{id}-{index}")))
+            .cursor_pointer()
+            .text_color(muted)
+            .hover(move |s| s.text_color(hover).underline())
+            .child(label)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                match how {
+                    Some(how) => this.resolve_conflict(Some(index), how, cx),
+                    None => this.toggle_conflict_compare(cx),
+                }
+            }))
+    };
+    let bar = || div().text_color(t.faint).child("|");
+    base.items_end()
+        .pb(px(2.))
+        .pl(px(60.))
+        .gap(px(6.))
+        .font_family(ui.clone())
+        .text_size(px(11.))
+        .child(link(
+            "accept-current",
+            "Accept Current Change",
+            Some(Resolution::Current),
+            cx,
+        ))
+        .child(bar())
+        .child(link(
+            "accept-incoming",
+            "Accept Incoming Change",
+            Some(Resolution::Incoming),
+            cx,
+        ))
+        .child(bar())
+        .child(link(
+            "accept-both",
+            "Accept Both Changes",
+            Some(Resolution::Both),
+            cx,
+        ))
+        .child(bar())
+        .child(link("compare-changes", "Compare Changes", None, cx))
+}
+
 fn blame_ghost(diff: &DiffState, is_cursor: bool, side: Option<&Side>) -> Option<String> {
     if !is_cursor {
         return None;
@@ -1415,6 +1593,12 @@ fn kind_style(kind: LineKind, t: &Theme) -> (Option<Hsla>, &'static str) {
         LineKind::Context => (None, ""),
         LineKind::Removed => (Some(t.del_line), "−"),
         LineKind::Added => (Some(t.add_line), "+"),
+        LineKind::CurrentMarker => (Some(t.cur_head), ""),
+        LineKind::Current => (Some(t.cur_line), ""),
+        LineKind::Base => (Some(t.base_line), ""),
+        LineKind::Separator => (None, ""),
+        LineKind::Incoming => (Some(t.inc_line), ""),
+        LineKind::IncomingMarker => (Some(t.inc_head), ""),
     }
 }
 
@@ -1482,7 +1666,7 @@ fn code(
     let chg_bg = match side.kind {
         LineKind::Added => Some(t.add_chg),
         LineKind::Removed => Some(t.del_chg),
-        LineKind::Context => None,
+        _ => None,
     };
     let text = if part.blank {
         SharedString::default()

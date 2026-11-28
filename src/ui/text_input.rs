@@ -36,6 +36,19 @@ actions!(
         Cut,
         Copy,
         ShowCharacterPalette,
+        WordLeft,
+        WordRight,
+        SelectWordLeft,
+        SelectWordRight,
+        SelectToLineStart,
+        SelectToLineEnd,
+        DocStart,
+        DocEnd,
+        SelectToDocStart,
+        SelectToDocEnd,
+        DeleteWordLeft,
+        DeleteWordRight,
+        DeleteToLineStart,
     ]
 );
 
@@ -231,18 +244,144 @@ impl TextInput {
     }
 
     fn home(&mut self, _: &Home, _: &mut Window, cx: &mut Context<Self>) {
-        let start = self.content[..self.cursor_offset()]
-            .rfind('\n')
-            .map_or(0, |i| i + 1);
-        self.move_to(start, cx);
+        self.move_to(self.line_start(), cx);
     }
 
     fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.line_end(), cx);
+    }
+
+    /// Start of the line the cursor is on, as shown (a wrapped line counts as several).
+    fn line_start(&self) -> usize {
         let c = self.cursor_offset();
-        let end = self.content[c..]
+        let hard = self.content[..c].rfind('\n').map_or(0, |i| i + 1);
+        match &self.layout {
+            Some(l) => {
+                let p = l.position_for(c);
+                l.offset_for(point(px(0.), p.y + l.line_height / 2.))
+                    .clamp(hard, c)
+            }
+            None => hard,
+        }
+    }
+
+    /// End of the line the cursor is on, as shown.
+    fn line_end(&self) -> usize {
+        let c = self.cursor_offset();
+        let hard = self.content[c..]
             .find('\n')
             .map_or(self.content.len(), |i| c + i);
-        self.move_to(end, cx);
+        match &self.layout {
+            Some(l) => {
+                let p = l.position_for(c);
+                l.offset_for(point(px(100_000.), p.y + l.line_height / 2.))
+                    .clamp(c, hard)
+            }
+            None => hard,
+        }
+    }
+
+    fn word_left(&mut self, _: &WordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        let to = if self.selected_range.is_empty() {
+            prev_word(&self.content, self.cursor_offset())
+        } else {
+            self.selected_range.start
+        };
+        self.move_to(to, cx);
+    }
+
+    fn word_right(&mut self, _: &WordRight, _: &mut Window, cx: &mut Context<Self>) {
+        let to = if self.selected_range.is_empty() {
+            next_word(&self.content, self.cursor_offset())
+        } else {
+            self.selected_range.end
+        };
+        self.move_to(to, cx);
+    }
+
+    fn select_word_left(&mut self, _: &SelectWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(prev_word(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn select_word_right(&mut self, _: &SelectWordRight, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(next_word(&self.content, self.cursor_offset()), cx);
+    }
+
+    fn select_to_line_start(
+        &mut self,
+        _: &SelectToLineStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_to(self.line_start(), cx);
+    }
+
+    fn select_to_line_end(&mut self, _: &SelectToLineEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.line_end(), cx);
+    }
+
+    fn doc_start(&mut self, _: &DocStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(0, cx);
+    }
+
+    fn doc_end(&mut self, _: &DocEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_to(self.content.len(), cx);
+    }
+
+    fn select_to_doc_start(
+        &mut self,
+        _: &SelectToDocStart,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.select_to(0, cx);
+    }
+
+    fn select_to_doc_end(&mut self, _: &SelectToDocEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.content.len(), cx);
+    }
+
+    fn delete_word_left(
+        &mut self,
+        _: &DeleteWordLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            self.select_to(prev_word(&self.content, self.cursor_offset()), cx)
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
+    fn delete_word_right(
+        &mut self,
+        _: &DeleteWordRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            self.select_to(next_word(&self.content, self.cursor_offset()), cx)
+        }
+        self.replace_text_in_range(None, "", window, cx)
+    }
+
+    fn delete_to_line_start(
+        &mut self,
+        _: &DeleteToLineStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected_range.is_empty() {
+            let start = self.line_start();
+            // At the start of a line, join it with the line above.
+            let start = if start == self.cursor_offset() {
+                self.previous_boundary(start)
+            } else {
+                start
+            };
+            self.select_to(start, cx)
+        }
+        self.replace_text_in_range(None, "", window, cx)
     }
 
     fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
@@ -785,6 +924,19 @@ impl Render for TextInput {
             .on_action(cx.listener(Self::select_all))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
+            .on_action(cx.listener(Self::word_left))
+            .on_action(cx.listener(Self::word_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
+            .on_action(cx.listener(Self::select_to_line_start))
+            .on_action(cx.listener(Self::select_to_line_end))
+            .on_action(cx.listener(Self::doc_start))
+            .on_action(cx.listener(Self::doc_end))
+            .on_action(cx.listener(Self::select_to_doc_start))
+            .on_action(cx.listener(Self::select_to_doc_end))
+            .on_action(cx.listener(Self::delete_word_left))
+            .on_action(cx.listener(Self::delete_word_right))
+            .on_action(cx.listener(Self::delete_to_line_start))
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::show_character_palette))
@@ -809,7 +961,7 @@ impl Focusable for TextInput {
 pub fn key_bindings() -> Vec<gpui::KeyBinding> {
     use gpui::KeyBinding;
     let ctx = Some("TextInput");
-    vec![
+    let bindings = vec![
         KeyBinding::new("backspace", Backspace, ctx),
         KeyBinding::new("delete", Delete, ctx),
         KeyBinding::new("left", Left, ctx),
@@ -830,5 +982,120 @@ pub fn key_bindings() -> Vec<gpui::KeyBinding> {
         KeyBinding::new("shift-enter", Newline, ctx),
         KeyBinding::new("escape", Cancel, ctx),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, ctx),
-    ]
+        KeyBinding::new("shift-home", SelectToLineStart, ctx),
+        KeyBinding::new("shift-end", SelectToLineEnd, ctx),
+    ];
+    // Moving by word and by line, as in VS Code on each platform.
+    #[cfg(target_os = "macos")]
+    let platform = [
+        KeyBinding::new("alt-left", WordLeft, ctx),
+        KeyBinding::new("alt-right", WordRight, ctx),
+        KeyBinding::new("alt-shift-left", SelectWordLeft, ctx),
+        KeyBinding::new("alt-shift-right", SelectWordRight, ctx),
+        KeyBinding::new("cmd-left", Home, ctx),
+        KeyBinding::new("cmd-right", End, ctx),
+        KeyBinding::new("ctrl-a", Home, ctx),
+        KeyBinding::new("ctrl-e", End, ctx),
+        KeyBinding::new("cmd-shift-left", SelectToLineStart, ctx),
+        KeyBinding::new("cmd-shift-right", SelectToLineEnd, ctx),
+        KeyBinding::new("cmd-up", DocStart, ctx),
+        KeyBinding::new("cmd-down", DocEnd, ctx),
+        KeyBinding::new("cmd-home", DocStart, ctx),
+        KeyBinding::new("cmd-end", DocEnd, ctx),
+        KeyBinding::new("cmd-shift-up", SelectToDocStart, ctx),
+        KeyBinding::new("cmd-shift-down", SelectToDocEnd, ctx),
+        KeyBinding::new("alt-backspace", DeleteWordLeft, ctx),
+        KeyBinding::new("alt-delete", DeleteWordRight, ctx),
+        KeyBinding::new("cmd-backspace", DeleteToLineStart, ctx),
+    ];
+    #[cfg(not(target_os = "macos"))]
+    let platform = [
+        KeyBinding::new("ctrl-left", WordLeft, ctx),
+        KeyBinding::new("ctrl-right", WordRight, ctx),
+        KeyBinding::new("ctrl-shift-left", SelectWordLeft, ctx),
+        KeyBinding::new("ctrl-shift-right", SelectWordRight, ctx),
+        KeyBinding::new("ctrl-home", DocStart, ctx),
+        KeyBinding::new("ctrl-end", DocEnd, ctx),
+        KeyBinding::new("ctrl-shift-home", SelectToDocStart, ctx),
+        KeyBinding::new("ctrl-shift-end", SelectToDocEnd, ctx),
+        KeyBinding::new("ctrl-backspace", DeleteWordLeft, ctx),
+        KeyBinding::new("ctrl-delete", DeleteWordRight, ctx),
+    ];
+    let mut all = bindings;
+    all.extend(platform);
+    all
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CharClass {
+    Space,
+    Word,
+    Punct,
+}
+
+fn class(c: char) -> CharClass {
+    if c.is_whitespace() {
+        CharClass::Space
+    } else if c.is_alphanumeric() || c == '_' {
+        CharClass::Word
+    } else {
+        CharClass::Punct
+    }
+}
+
+/// Where Option/Ctrl+Left lands: the start of the word before `offset`,
+/// skipping spaces first (a run of punctuation counts as a word).
+fn prev_word(text: &str, offset: usize) -> usize {
+    let mut chars = text[..offset].char_indices().rev().peekable();
+    while chars
+        .next_if(|(_, c)| class(*c) == CharClass::Space)
+        .is_some()
+    {}
+    let Some(&(mut at, first)) = chars.peek() else {
+        return 0;
+    };
+    let kind = class(first);
+    while let Some((i, _)) = chars.next_if(|(_, c)| class(*c) == kind) {
+        at = i;
+    }
+    at
+}
+
+/// Where Option/Ctrl+Right lands: the end of the word after `offset`.
+fn next_word(text: &str, offset: usize) -> usize {
+    let mut chars = text[offset..].char_indices().peekable();
+    while chars
+        .next_if(|(_, c)| class(*c) == CharClass::Space)
+        .is_some()
+    {}
+    let Some(&(_, first)) = chars.peek() else {
+        return text.len();
+    };
+    let kind = class(first);
+    let mut end = text.len() - offset;
+    while let Some((i, c)) = chars.next_if(|(_, c)| class(*c) == kind) {
+        end = i + c.len_utf8();
+    }
+    offset + end
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{next_word, prev_word};
+
+    #[test]
+    fn jumps_by_word() {
+        let t = "fix: the  parser_v2 now";
+        assert_eq!(next_word(t, 0), 3);
+        assert_eq!(next_word(t, 3), 4);
+        assert_eq!(next_word(t, 4), 8);
+        assert_eq!(next_word(t, 8), 19);
+        assert_eq!(next_word(t, t.len()), t.len());
+        assert_eq!(prev_word(t, t.len()), 20);
+        assert_eq!(prev_word(t, 20), 10);
+        assert_eq!(prev_word(t, 10), 5);
+        assert_eq!(prev_word(t, 4), 3);
+        assert_eq!(prev_word(t, 3), 0);
+        assert_eq!(prev_word("héllo wörld", 13), 7);
+    }
 }

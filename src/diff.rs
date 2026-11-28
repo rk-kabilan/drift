@@ -15,6 +15,19 @@ pub enum LineKind {
     Context,
     Removed,
     Added,
+    // Parts of a merge conflict, in the conflict view.
+    /// `<<<<<<< HEAD`
+    CurrentMarker,
+    /// A line of the current change (ours).
+    Current,
+    /// The `|||||||` marker and the common ancestor's lines (diff3 style).
+    Base,
+    /// `=======`
+    Separator,
+    /// A line of the incoming change (theirs).
+    Incoming,
+    /// `>>>>>>> branch`
+    IncomingMarker,
 }
 
 /// One line on one side of the diff.
@@ -52,6 +65,8 @@ pub enum Row {
     },
     /// A folded run of unchanged lines; clicking it expands fold `id`.
     Fold { id: usize, hidden: usize },
+    /// The actions above merge conflict `index` (Accept Current | Accept Incoming | …).
+    Conflict { index: usize },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -315,7 +330,7 @@ impl FileDiff {
     }
 }
 
-fn split_lines(text: &str) -> Vec<Arc<str>> {
+pub(crate) fn split_lines(text: &str) -> Vec<Arc<str>> {
     text.lines().map(|l| Arc::from(&*expand_tabs(l))).collect()
 }
 
