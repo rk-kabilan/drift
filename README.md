@@ -25,7 +25,7 @@ cargo run --release              # opens the repository containing the current f
 cargo run --release -- ~/code/x  # or a given path
 ```
 
-Started anywhere else (or from the Dock, Start menu or app launcher), Drift shows a welcome screen: open a repository folder, clone one, create a new one, or pick one of the last ten you opened. Each repository opens in its own window; the welcome window becomes the first one you open from it. The recent list is kept in `~/Library/Application Support/drift/` on macOS, `%APPDATA%\drift\` on Windows and `~/.local/state/drift/` on Linux.
+Started anywhere else (or from the Dock, Start menu or app launcher), Drift shows a welcome screen: open a repository folder, clone one, create a new one, or pick one of the last ten you opened. Each repository opens in its own window; the welcome window becomes the first one you open from it. On macOS with "Prefer tabs when opening documents: Always" (Desktop & Dock), new windows open as tabs of the current one, with a tab bar under the title bar: click a tab to switch, its × or a middle-click to close it, `+` for a new tab. The recent list is kept in `~/Library/Application Support/drift/` on macOS, `%APPDATA%\drift\` on Windows and `~/.local/state/drift/` on Linux.
 
 **Linux** also needs the usual GPUI system libraries, for example on Debian/Ubuntu:
 
@@ -80,7 +80,7 @@ The tests run first, and the packages build only if they pass. The workflow stop
 
 Open Settings with `Cmd+,` / `Ctrl+,`, the gear in the status bar, or "Settings: Open Settings" in the command palette.
 
-- **General**: theme (System, Light or Dark; the sun/moon button in the status bar switches too), word wrap, the history graph, background fetch (on by default, every 5 seconds; the interval can be changed or fetching turned off) and the automatic update check.
+- **General**: theme (System, Light or Dark; the sun/moon button in the status bar switches too), word wrap, the history graph, background fetch (on by default, every 5 seconds; the interval can be changed or fetching turned off) and the automatic update check. A new version downloads and installs by itself; click **Restart to Update** in the status bar to start it. Copies installed from a .deb or .rpm, or in a folder Drift can't write to, link to the download page instead.
 - **Keyboard Shortcuts**: every action that can have a shortcut. Click Change and press the new keys (Esc cancels), Remove to leave an action without one, Reset to go back to the default. Shortcuts need Ctrl, Alt or Cmd, or a function key. Two actions with the same keys are flagged.
 
 Settings are saved to `settings` in the state folder (macOS `~/Library/Application Support/drift/`, Windows `%APPDATA%\drift\`, Linux `~/.local/state/drift/`), as `key=value` lines:
@@ -92,10 +92,24 @@ word_wrap=false
 show_graph=true
 auto_fetch=true
 auto_fetch_interval=5
+panel_open=false
+panel_tab=output
+panel_height=240
 key.CommandPalette=ctrl-k
 ```
 
+`terminal_shell=/bin/bash -l` (a command line) picks the terminal's shell; without it the terminal starts your login shell (PowerShell on Windows).
+
 `DRIFT_THEME=light|dark` still pins the theme a window starts with.
+
+## Output and Terminal
+
+The panel under the diff has two tabs, as in VS Code:
+
+- **Output** lists the git commands Drift runs, with how long each took, and every error and warning. A failed operation opens the panel on Output and shows the message in the status bar for a few seconds; click it to jump to Output. Hints such as "No staged changes" only show in the status bar and Output. The log keeps the last 2,000 entries (at most 512 KB), and tokens in remote URLs are masked.
+- **Terminal** starts a shell in the repository root the first time you open it. `+` adds more shells; they are listed beside the terminal. While the terminal has focus, keys go to the shell except the panel shortcuts, the command palette, Go to File and Quit. Copy and paste with `Cmd+C` / `Cmd+V` on macOS and `Ctrl+Shift+C` / `Ctrl+Shift+V` elsewhere (on Windows `Ctrl+C` copies when text is selected). `Cmd+K` clears it on macOS. Scrollback keeps 1,000 lines.
+
+Drag the panel's top edge to resize it (double-click resets it); the arrow button maximizes it.
 
 ## Keyboard
 
@@ -109,10 +123,17 @@ Defaults (change them in Settings → Keyboard Shortcuts):
 | `F5`, `Ctrl+R` / `Cmd+R` | Refresh |
 | `Ctrl+O` / `Cmd+O` | Open a repository in a new window (or bring its window forward) |
 | `Ctrl+Shift+N` / `Cmd+Shift+N` | New window |
+| `Ctrl+W` / `Cmd+W` | Close the diff tab, or the window when no diff is open |
+| `Ctrl+Shift+W` / `Cmd+Shift+W` | Close the window |
+| `Cmd+Shift+]` / `Cmd+Shift+[` | Next / previous window tab (macOS); next / previous terminal while a terminal has focus |
 | `Ctrl+Shift+P` / `Cmd+Shift+P`, `F1` | Command palette |
 | `Ctrl+P` / `Cmd+P` | Go to file |
 | `Alt+Z` / `Option+Z` | Toggle word wrap |
 | `Ctrl+Shift+G` / `Cmd+Shift+G` | Show or hide the history graph |
+| `Ctrl+J` / `Cmd+J` | Show or hide the bottom panel |
+| `` Ctrl+` `` | Open, focus or hide the terminal |
+| `` Ctrl+Shift+` `` | New terminal |
+| `Ctrl+Shift+U` / `Cmd+Shift+U` | Show Output |
 | `Ctrl+,` / `Cmd+,` | Settings |
 | `Ctrl+Q` / `Cmd+Q` | Quit |
 

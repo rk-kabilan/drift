@@ -46,6 +46,9 @@ fn folder_name(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// A button on the update banner: its label and what it does.
+type BannerAction = (&'static str, Box<dyn Fn(&mut gpui::App)>);
+
 impl Workspace {
     /// Opens the repository containing `path` in its own window. A window that
     /// already has it comes to the front instead, and the welcome window turns into
@@ -104,11 +107,11 @@ impl Workspace {
         }
     }
 
-    /// Shows why opening failed: on the welcome screen, or in the error banner
+    /// Shows why opening failed: on the welcome screen, or in the Output panel
     /// when a repository is open.
     pub(super) fn open_failed(&mut self, message: String, cx: &mut Context<Self>) {
         if self.repo.is_some() {
-            self.error = Some(message);
+            self.report_error(message, cx);
         } else {
             self.welcome_error = Some(message);
         }
@@ -250,6 +253,51 @@ impl Workspace {
         .detach();
     }
 
+    /// The note under the welcome heading about a newer version: download it,
+    /// see it downloading, or restart into it.
+    fn render_update_banner(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        use crate::update::Offer;
+        let t = cx.theme().clone();
+        let (text, action): (String, Option<BannerAction>) = match crate::update::offer(cx) {
+            Offer::None => return None,
+            Offer::Page(u) => (
+                format!("Drift {} is available.", u.version),
+                Some(("Download", Box::new(move |cx| cx.open_url(&u.url)))),
+            ),
+            Offer::Downloading(v) => (format!("Downloading Drift {v}…"), None),
+            Offer::Restart(v) => (
+                format!("Drift {v} is installed."),
+                Some(("Restart", Box::new(super::workspace::restart))),
+            ),
+        };
+        Some(
+            div()
+                .id("welcome-update")
+                .mt(px(12.))
+                .px(px(10.))
+                .py(px(6.))
+                .rounded(px(4.))
+                .border_1()
+                .border_color(t.accent.opacity(0.5))
+                .bg(t.accent.opacity(0.08))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(icon_sized("arrow-down", 14., t.accent))
+                .child(div().flex_1().child(text))
+                .when_some(action, |d, (label, run)| {
+                    d.child(
+                        div()
+                            .text_color(t.accent)
+                            .cursor_pointer()
+                            .hover(|s| s.underline())
+                            .child(label),
+                    )
+                    .on_click(move |_, _, cx| run(cx))
+                }),
+        )
+    }
+
     /// Checks for a newer release now and says what it found.
     pub fn check_for_updates(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.checking_updates {
@@ -267,6 +315,39 @@ impl Workspace {
                 cx.notify();
                 let current = env!("CARGO_PKG_VERSION");
                 match found {
+                    Ok(Some(update)) if crate::update::can_install() => {
+                        crate::update::publish(Some(update.clone()), cx);
+                        // Retry a download that failed earlier.
+                        crate::update::download(&update, true, cx);
+                        let ready = matches!(
+                            cx.global::<crate::update::Install>(),
+                            crate::update::Install::Ready(v) if *v == update.version
+                        );
+                        let (detail, buttons): (String, &[&str]) = if ready {
+                            (
+                                format!("You have {current}. The new version is installed; restart Drift to start it."),
+                                &["Restart Now", "Later"],
+                            )
+                        } else {
+                            (
+                                format!("You have {current}. The new version is downloading and installs by itself. Restart Drift when the status bar says it's ready."),
+                                &["OK"],
+                            )
+                        };
+                        let answer = window.prompt(
+                            PromptLevel::Info,
+                            &format!("Drift {} is available", update.version),
+                            Some(&detail),
+                            buttons,
+                            cx,
+                        );
+                        cx.spawn(async move |_, cx| {
+                            if ready && matches!(answer.await, Ok(0)) {
+                                cx.update(super::workspace::restart).ok();
+                            }
+                        })
+                        .detach();
+                    }
                     Ok(Some(update)) => {
                         crate::update::publish(Some(update.clone()), cx);
                         let answer = window.prompt(
@@ -477,41 +558,10 @@ impl Workspace {
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child("Drift"),
                             )
-                            .child(
-                                div()
-                                    .text_color(t.muted)
-                                    .child("A fast Git desktop client"),
-                            ),
+                            .child(div().text_color(t.muted).child("A fast Git desktop client")),
                     ),
             )
-            .children(cx.global::<crate::update::Available>().0.clone().map(|u| {
-                div()
-                    .id("welcome-update")
-                    .mt(px(12.))
-                    .px(px(10.))
-                    .py(px(6.))
-                    .rounded(px(4.))
-                    .border_1()
-                    .border_color(t.accent.opacity(0.5))
-                    .bg(t.accent.opacity(0.08))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(icon_sized("arrow-down", 14., t.accent))
-                    .child(
-                        div()
-                            .flex_1()
-                            .child(format!("Drift {} is available.", u.version)),
-                    )
-                    .child(
-                        div()
-                            .text_color(t.accent)
-                            .cursor_pointer()
-                            .hover(|s| s.underline())
-                            .child("Download"),
-                    )
-                    .on_click(move |_, _, cx| cx.open_url(&u.url))
-            }))
+            .children(self.render_update_banner(cx))
             .children(self.welcome_error.clone().map(|e| {
                 div()
                     .mt(px(12.))

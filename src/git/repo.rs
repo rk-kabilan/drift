@@ -580,7 +580,8 @@ impl Repo {
     /// The background fetch: like [`Repo::fetch`], but never asks for
     /// credentials and doesn't start a `git gc` every few seconds.
     pub fn auto_fetch(root: &Path) -> Result<()> {
-        run_git(
+        // Not traced: every few seconds it would push everything else out of the log.
+        run_git_traced(
             root,
             &[
                 "-c",
@@ -594,6 +595,7 @@ impl Repo {
                 "--no-show-forced-updates",
             ],
             None,
+            false,
         )
         .map(drop)
     }
@@ -721,6 +723,32 @@ impl Repo {
 }
 
 fn run_git(root: &Path, args: &[&str], stdin: Option<&str>) -> Result<String> {
+    run_git_traced(root, args, stdin, true)
+}
+
+/// Runs git in `root`. With `trace`, the command line and how long it took go
+/// to the Output log (failures always do).
+fn run_git_traced(root: &Path, args: &[&str], stdin: Option<&str>, trace: bool) -> Result<String> {
+    let started = std::time::Instant::now();
+    let result = run_git_untraced(root, args, stdin);
+    if trace || result.is_err() {
+        let took = started.elapsed();
+        let took = if took.as_millis() < 1000 {
+            format!("{} ms", took.as_millis())
+        } else {
+            format!("{:.1} s", took.as_secs_f32())
+        };
+        let status = if result.is_err() { ", failed" } else { "" };
+        crate::output::push(
+            crate::output::Level::Info,
+            Some(root),
+            &format!("> git {} [{took}{status}]", args.join(" ")),
+        );
+    }
+    result
+}
+
+fn run_git_untraced(root: &Path, args: &[&str], stdin: Option<&str>) -> Result<String> {
     let mut cmd = Command::new("git");
     // A GUI app on Windows would otherwise flash a console window for each git run.
     #[cfg(windows)]

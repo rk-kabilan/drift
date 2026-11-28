@@ -24,7 +24,7 @@ macro_rules! shortcuts {
         /// A binding of `keys` to the action named `id`. `keys` must be valid.
         fn binding(id: &str, keys: &str) -> Option<KeyBinding> {
             match id {
-                $(stringify!($action) => Some(KeyBinding::new(keys, $action, None)),)*
+                $(stringify!($action) => Some(KeyBinding::new(keys, $action, context(id))),)*
                 _ => None,
             }
         }
@@ -46,16 +46,48 @@ shortcuts! {
     Sync => "Sync", [];
     Save => "Save", ["secondary-s"];
     CloseTab => "Close Tab", ["secondary-w"];
+    CloseWindow => "Close Window", ["secondary-shift-w"];
     NextTab => "Next Tab", ["ctrl-tab"];
     PreviousTab => "Previous Tab", ["ctrl-shift-tab"];
     ToggleLayout => "Toggle Inline / Side by Side", [];
     ToggleWordWrap => "Toggle Word Wrap", ["alt-z"];
     ToggleGraph => "Toggle History Graph", ["secondary-shift-g"];
+    TogglePanel => "Toggle Panel", ["secondary-j"];
+    ToggleTerminal => "Toggle Terminal", ["ctrl-`"];
+    NewTerminal => "New Terminal", ["ctrl-shift-`", "ctrl-~"];
+    ShowOutput => "Show Output", ["secondary-shift-u"];
+    ClearOutput => "Clear Output", [];
+    ToggleMaximizedPanel => "Toggle Maximized Panel", [];
+    KillTerminal => "Kill Terminal", [];
+    FocusNextTerminal => "Focus Next Terminal", ["secondary-shift-]", "ctrl-pagedown"];
+    FocusPreviousTerminal => "Focus Previous Terminal", ["secondary-shift-[", "ctrl-pageup"];
+    NextWindowTab => "Show Next Window Tab", ["secondary-shift-]"];
+    PreviousWindowTab => "Show Previous Window Tab", ["secondary-shift-["];
     ToggleTheme => "Toggle Light / Dark Theme", [];
     OpenRepository => "Open Repository", ["secondary-o"];
     NewWindow => "New Window", ["secondary-shift-n"];
     CheckForUpdates => "Check for Updates", [];
     Quit => "Quit", ["secondary-q"];
+}
+
+/// Where a binding applies: everywhere, or only in a terminal. In a terminal,
+/// Cmd+Shift+] and [ move between terminals; elsewhere between window tabs.
+fn context(id: &str) -> Option<&'static str> {
+    match id {
+        "FocusNextTerminal" | "FocusPreviousTerminal" => Some("Terminal"),
+        _ => None,
+    }
+}
+
+/// Whether the action exists on this platform: only macOS has window tabs.
+pub fn available(id: &str) -> bool {
+    cfg!(target_os = "macos") || !matches!(id, "NextWindowTab" | "PreviousWindowTab")
+}
+
+/// Whether the same keys on `a` and `b` would be a clash: both exist here and
+/// apply in the same place.
+pub fn can_clash(a: &str, b: &str) -> bool {
+    a != b && available(a) && available(b) && context(a) == context(b)
 }
 
 pub fn find(id: &str) -> Option<&'static Shortcut> {
@@ -96,16 +128,52 @@ pub fn is_custom(s: &Shortcut, settings: &Settings) -> bool {
     settings.keys.contains_key(s.id)
 }
 
+/// Actions whose keys still reach Drift while a terminal has focus, as in
+/// VS Code's `commandsToSkipShell`. Every other shortcut goes to the shell.
+const TERMINAL_PASS_THROUGH: &[&str] = &[
+    "TogglePanel",
+    "ToggleTerminal",
+    "NewTerminal",
+    "ShowOutput",
+    "ClearOutput",
+    "ToggleMaximizedPanel",
+    "KillTerminal",
+    "FocusNextTerminal",
+    "FocusPreviousTerminal",
+    "CommandPalette",
+    "QuickOpen",
+    "Quit",
+];
+
 /// The key bindings of every action, with the user's overrides.
 pub fn bindings(settings: &Settings) -> Vec<KeyBinding> {
-    SHORTCUTS
+    let mut out: Vec<KeyBinding> = SHORTCUTS
         .iter()
+        .filter(|s| available(s.id))
         .flat_map(|s| {
             keys_for(s, settings)
                 .into_iter()
                 .filter_map(move |k| binding(s.id, &k))
         })
-        .collect()
+        .collect();
+    // In a terminal, keys the shell needs (Ctrl+R, Ctrl+W, F5…) go to the
+    // shell. Cmd shortcuts on macOS never reach a shell, so they stay.
+    for s in SHORTCUTS {
+        if TERMINAL_PASS_THROUGH.contains(&s.id) || !available(s.id) {
+            continue;
+        }
+        for k in keys_for(s, settings) {
+            let reaches_shell = k
+                .split_whitespace()
+                .next()
+                .and_then(|k| Keystroke::parse(k).ok())
+                .is_some_and(|k| !k.modifiers.platform);
+            if reaches_shell {
+                out.push(KeyBinding::new(&k, gpui::NoAction, Some("Terminal")));
+            }
+        }
+    }
+    out
 }
 
 /// Rebinds every key from the current settings.
@@ -113,6 +181,8 @@ pub fn apply(cx: &mut App) {
     let bindings = bindings(cx.global::<Settings>());
     cx.clear_key_bindings();
     cx.bind_keys(super::text_input::key_bindings());
+    cx.bind_keys(super::terminal_view::key_bindings());
+    cx.bind_keys(super::panel::key_bindings());
     cx.bind_keys(bindings);
 }
 

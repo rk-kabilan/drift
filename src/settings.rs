@@ -25,6 +25,8 @@ const KEY_PREFIX: &str = "key.";
 
 /// Seconds between background fetches unless the user picks another interval.
 pub const DEFAULT_FETCH_INTERVAL: u64 = 5;
+/// Height of the bottom panel until it is dragged.
+pub const DEFAULT_PANEL_HEIGHT: f32 = 240.;
 /// Shortest interval accepted, so a typo can't hammer the remote.
 pub const MIN_FETCH_INTERVAL: u64 = 2;
 /// The steps the interval control in Settings moves through.
@@ -66,7 +68,30 @@ impl ThemeChoice {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanelTab {
+    Output,
+    Terminal,
+}
+
+impl PanelTab {
+    pub fn name(self) -> &'static str {
+        match self {
+            PanelTab::Output => "output",
+            PanelTab::Terminal => "terminal",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "output" => Some(PanelTab::Output),
+            "terminal" => Some(PanelTab::Terminal),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     pub theme: ThemeChoice,
     /// Check for a new release once a day.
@@ -78,6 +103,13 @@ pub struct Settings {
     /// Fetch from the remotes in the background every `auto_fetch_interval` seconds.
     pub auto_fetch: bool,
     pub auto_fetch_interval: u64,
+    /// The bottom panel is open, on which tab, and how tall.
+    pub panel_open: bool,
+    pub panel_tab: PanelTab,
+    pub panel_height: f32,
+    /// The terminal's shell as a command line ("/bin/bash -l"); `None` starts
+    /// the user's login shell (PowerShell on Windows).
+    pub terminal_shell: Option<String>,
     /// Shortcut overrides: action id → keystroke (`""` means no shortcut).
     pub keys: BTreeMap<String, String>,
     /// Lines this version doesn't understand, written back unchanged.
@@ -93,6 +125,10 @@ impl Default for Settings {
             show_graph: false,
             auto_fetch: true,
             auto_fetch_interval: DEFAULT_FETCH_INTERVAL,
+            panel_open: false,
+            panel_tab: PanelTab::Output,
+            panel_height: DEFAULT_PANEL_HEIGHT,
+            terminal_shell: None,
             keys: BTreeMap::new(),
             other: Vec::new(),
         }
@@ -181,6 +217,18 @@ fn parse(text: &str) -> Settings {
                     .filter(|&n| n >= MIN_FETCH_INTERVAL)
                     .unwrap_or(DEFAULT_FETCH_INTERVAL)
             }
+            "panel_open" => s.panel_open = value == "true",
+            "panel_tab" => s.panel_tab = PanelTab::from_name(value).unwrap_or(PanelTab::Output),
+            "panel_height" => {
+                s.panel_height = value
+                    .parse::<f32>()
+                    .ok()
+                    .filter(|h| h.is_finite() && *h >= 60.)
+                    .unwrap_or(DEFAULT_PANEL_HEIGHT)
+            }
+            "terminal_shell" => {
+                s.terminal_shell = Some(value.to_string()).filter(|v| !v.is_empty())
+            }
             _ => match key.strip_prefix(KEY_PREFIX) {
                 Some(action) if !action.is_empty() => {
                     s.keys.insert(action.to_string(), value.to_string());
@@ -202,6 +250,15 @@ fn format(s: &Settings) -> String {
         s.auto_fetch,
         s.auto_fetch_interval
     );
+    text.push_str(&format!(
+        "panel_open={}\npanel_tab={}\npanel_height={}\n",
+        s.panel_open,
+        s.panel_tab.name(),
+        s.panel_height.round()
+    ));
+    if let Some(shell) = &s.terminal_shell {
+        text.push_str(&format!("terminal_shell={shell}\n"));
+    }
     for (action, keys) in &s.keys {
         text.push_str(&format!("{KEY_PREFIX}{action}={keys}\n"));
     }
@@ -234,12 +291,16 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let text = "theme=dark\ncheck_updates=false\nword_wrap=true\nshow_graph=true\nauto_fetch=false\nauto_fetch_interval=30\nkey.Refresh=f5\nkey.Quit=\nfuture=1\n";
+        let text = "theme=dark\ncheck_updates=false\nword_wrap=true\nshow_graph=true\nauto_fetch=false\nauto_fetch_interval=30\npanel_open=true\npanel_tab=terminal\npanel_height=300\nterminal_shell=/bin/bash -l\nkey.Refresh=f5\nkey.Quit=\nfuture=1\n";
         let s = parse(text);
         assert_eq!(s.theme, ThemeChoice::Dark);
         assert!(!s.check_updates);
         assert!(s.word_wrap && s.show_graph && !s.auto_fetch);
         assert_eq!(s.auto_fetch_interval, 30);
+        assert!(s.panel_open);
+        assert_eq!(s.panel_tab, PanelTab::Terminal);
+        assert_eq!(s.panel_height, 300.);
+        assert_eq!(s.terminal_shell.as_deref(), Some("/bin/bash -l"));
         assert_eq!(s.keys.get("Refresh").map(String::as_str), Some("f5"));
         assert_eq!(s.keys.get("Quit").map(String::as_str), Some(""));
         assert_eq!(parse(&format(&s)), s);

@@ -14,6 +14,9 @@ anyhow = "1"
 env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
 log = "0.4"
 unicode-segmentation = "1"
+alacritty_terminal = { version = "=0.26.0", default-features = false }
+jiff = { version = "0.2", default-features = false, features = ["std", "tz-system"] }
+async-channel = "2"
 
 # Embeds the Windows app icon (assets/app-icon/windows/drift.rc) into drift.exe.
 [build-dependencies]

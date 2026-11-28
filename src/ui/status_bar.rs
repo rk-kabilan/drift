@@ -125,6 +125,32 @@ impl Workspace {
                     }),
             );
         }
+        if let Some((level, text)) = self.panel.alert.clone() {
+            let (icon, tip) = match level {
+                crate::output::Level::Error => ("error", "Show the error in Output"),
+                _ => ("warning", "Show in Output"),
+            };
+            bar = bar.child(
+                item("sb-alert")
+                    .cursor_pointer()
+                    .max_w(px(520.))
+                    .overflow_hidden()
+                    .bg(gpui::black().opacity(0.18))
+                    .child(icon_sized(icon, 14., fg))
+                    .child(
+                        div()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(text),
+                    )
+                    .tooltip(tooltip(format!(
+                        "{tip}{}",
+                        super::shortcuts::hint("ShowOutput", cx)
+                    )))
+                    .on_click(cx.listener(|this, _, window, cx| this.show_output(window, cx))),
+            );
+        }
         if let Some(note) = self.status_note {
             bar = bar.child(
                 item("sb-note")
@@ -214,7 +240,9 @@ impl Workspace {
     fn status_bar_app_items(&mut self, mut bar: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
         let t = cx.theme().clone();
         let fg = t.on_accent;
-        if let Some(update) = cx.global::<crate::update::Available>().0.clone() {
+        use crate::update::Offer;
+        let offer = crate::update::offer(cx);
+        if let Offer::Page(update) = offer {
             bar = bar.child(
                 item("sb-update")
                     .cursor_pointer()
@@ -223,8 +251,23 @@ impl Workspace {
                     .tooltip(tooltip("Open the download page"))
                     .on_click(move |_, _, cx| cx.open_url(&update.url)),
             );
+        } else if let Offer::Restart(version) = offer {
+            bar = bar.child(
+                item("sb-update")
+                    .cursor_pointer()
+                    .child(icon_sized("update", 14., fg))
+                    .child("Restart to Update")
+                    .tooltip(tooltip(format!(
+                        "Drift {version} is installed. Restart to start it."
+                    )))
+                    .on_click(|_, _, cx| super::workspace::restart(cx)),
+            );
         } else {
-            let checking = self.checking_updates;
+            let downloading = match &offer {
+                Offer::Downloading(v) => Some(v.clone()),
+                _ => None,
+            };
+            let checking = self.checking_updates || downloading.is_some();
             let update_icon = svg()
                 .path("icons/update.svg")
                 .size(px(14.))
@@ -246,7 +289,12 @@ impl Workspace {
                 item("sb-check-updates")
                     .when(!checking, |d| d.cursor_pointer())
                     .child(update_icon)
-                    .tooltip(tooltip(if checking {
+                    .when_some(downloading.clone(), |d, v| {
+                        d.child(format!("Downloading Drift {v}…"))
+                    })
+                    .tooltip(tooltip(if let Some(v) = &downloading {
+                        format!("Downloading Drift {v}. It installs by itself; restart when it's ready.")
+                    } else if checking {
                         "Checking for updates…".to_string()
                     } else {
                         format!(

@@ -35,7 +35,9 @@ commands! {
     CherryPick => "Cherry Pick...",
     Clone => "Clone...",
     CloseRepository => "Close Repository",
+    ClearOutput => "Clear Output",
     CloseAllDiffs => "Close All Diff Editors",
+    CloseWindow => "Close Window",
     ColorTheme => "Color Theme...",
     Commit => "Commit",
     CommitAmend => "Commit (Amend)",
@@ -65,8 +67,11 @@ commands! {
     FetchAll => "Fetch From All Remotes",
     Init => "Initialize Repository...",
     KeyboardShortcuts => "Keyboard Shortcuts",
+    KillTerminal => "Kill the Active Terminal",
     MergeBranch => "Merge Branch...",
+    NewTerminal => "Create New Terminal",
     NewWindow => "New Window",
+    NextWindowTab => "Show Next Window Tab",
     OpenAllChanges => "Open All Changes",
     OpenRecent => "Open Recent Repository...",
     OpenRepository => "Open Repository...",
@@ -74,6 +79,7 @@ commands! {
     OpenStagedChanges => "Open Staged Changes",
     PopLatestStash => "Pop Latest Stash",
     PopStash => "Pop Stash...",
+    PreviousWindowTab => "Show Previous Window Tab",
     PublishBranch => "Publish Branch...",
     Pull => "Pull",
     PullRebase => "Pull (Rebase)",
@@ -89,6 +95,7 @@ commands! {
     RevertUnsaved => "Revert Unsaved Edits",
     SaveChanges => "Save",
     SaveAll => "Save All",
+    ShowOutput => "Show Output",
     StageAll => "Stage All Changes",
     StageAllMerge => "Stage All Merge Changes",
     StageAllTracked => "Stage All Tracked Changes",
@@ -102,6 +109,9 @@ commands! {
     ToggleAutoFetch => "Toggle Auto Fetch",
     ToggleBlame => "Toggle Git Blame Status Bar Item",
     ToggleGraph => "Toggle History Graph",
+    ToggleMaximizedPanel => "Toggle Maximized Panel",
+    TogglePanel => "Toggle Panel",
+    ToggleTerminal => "Toggle Terminal",
     ToggleTheme => "Toggle Light/Dark Theme",
     ToggleWordWrap => "Toggle Word Wrap",
     UndoLastCommit => "Undo Last Commit",
@@ -121,6 +131,9 @@ impl Cmd {
                 | Cmd::Init
                 | Cmd::KeyboardShortcuts
                 | Cmd::NewWindow
+                | Cmd::CloseWindow
+                | Cmd::NextWindowTab
+                | Cmd::PreviousWindowTab
                 | Cmd::OpenRecent
                 | Cmd::OpenRepository
                 | Cmd::OpenSettings
@@ -138,12 +151,20 @@ impl Cmd {
             | Cmd::ToggleTheme => "Settings",
             Cmd::CloseRepository
             | Cmd::NewWindow
+            | Cmd::CloseWindow
             | Cmd::OpenRecent
             | Cmd::OpenRepository
             | Cmd::RevertUnsaved
             | Cmd::SaveAll
             | Cmd::SaveChanges => "File",
-            Cmd::ToggleGraph | Cmd::ToggleWordWrap => "View",
+            Cmd::NextWindowTab | Cmd::PreviousWindowTab => "Window",
+            Cmd::ToggleGraph
+            | Cmd::ToggleWordWrap
+            | Cmd::TogglePanel
+            | Cmd::ToggleTerminal
+            | Cmd::ToggleMaximizedPanel => "View",
+            Cmd::ShowOutput | Cmd::ClearOutput => "Output",
+            Cmd::NewTerminal | Cmd::KillTerminal => "Terminal",
             _ => "Git",
         }
     }
@@ -155,6 +176,9 @@ impl Cmd {
             Cmd::OpenSettings => "OpenSettings",
             Cmd::ToggleTheme => "ToggleTheme",
             Cmd::NewWindow => "NewWindow",
+            Cmd::CloseWindow => "CloseWindow",
+            Cmd::NextWindowTab => "NextWindowTab",
+            Cmd::PreviousWindowTab => "PreviousWindowTab",
             Cmd::OpenRepository => "OpenRepository",
             Cmd::SaveChanges => "Save",
             Cmd::Commit => "Commit",
@@ -165,6 +189,13 @@ impl Cmd {
             Cmd::Sync => "Sync",
             Cmd::ToggleWordWrap => "ToggleWordWrap",
             Cmd::ToggleGraph => "ToggleGraph",
+            Cmd::TogglePanel => "TogglePanel",
+            Cmd::ToggleTerminal => "ToggleTerminal",
+            Cmd::NewTerminal => "NewTerminal",
+            Cmd::ShowOutput => "ShowOutput",
+            Cmd::ClearOutput => "ClearOutput",
+            Cmd::ToggleMaximizedPanel => "ToggleMaximizedPanel",
+            Cmd::KillTerminal => "KillTerminal",
             _ => return None,
         })
     }
@@ -187,7 +218,10 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let t = cx.theme().clone();
-        let available = |c: &Cmd| self.repo.is_some() || !c.needs_repo();
+        let available = |c: &Cmd| {
+            (self.repo.is_some() || !c.needs_repo())
+                && c.shortcut_id().is_none_or(super::shortcuts::available)
+        };
         let mut order: Vec<Cmd> = self
             .recent_commands
             .iter()
@@ -252,7 +286,6 @@ impl Workspace {
         self.recent_commands.retain(|c| *c != cmd);
         self.recent_commands.insert(0, cmd);
         self.recent_commands.truncate(5);
-        self.error = None;
         let no_opts = CommitOptions::default();
         let amend = CommitOptions {
             amend: true,
@@ -270,6 +303,9 @@ impl Workspace {
             Cmd::Init => self.new_repo_dialog(window, cx),
             Cmd::CloseRepository => self.close_repo(window, cx),
             Cmd::NewWindow => self.new_window(window, cx),
+            Cmd::CloseWindow => self.close_window(window, cx),
+            Cmd::NextWindowTab => super::window_tabs::select_tab(1, window, cx),
+            Cmd::PreviousWindowTab => super::window_tabs::select_tab(-1, window, cx),
             Cmd::CheckForUpdates => self.check_for_updates(window, cx),
 
             // ---- settings ----
@@ -310,7 +346,7 @@ impl Workspace {
                         }
                         self.flash("Undid last commit", cx);
                     }
-                    Err(e) => self.error = Some(format!("{e:#}")),
+                    Err(e) => self.report_error(format!("{e:#}"), cx),
                 }
                 self.refresh(cx);
             }
@@ -432,6 +468,13 @@ impl Workspace {
             }
             Cmd::ToggleWordWrap => self.toggle_word_wrap(cx),
             Cmd::ToggleGraph => self.toggle_graph(cx),
+            Cmd::TogglePanel => self.toggle_panel(window, cx),
+            Cmd::ToggleTerminal => self.toggle_terminal(window, cx),
+            Cmd::ToggleMaximizedPanel => self.toggle_maximized_panel(window, cx),
+            Cmd::NewTerminal => self.new_terminal(window, cx),
+            Cmd::KillTerminal => self.kill_terminal(window, cx),
+            Cmd::ShowOutput => self.show_output(window, cx),
+            Cmd::ClearOutput => self.clear_output(cx),
             Cmd::ToggleAutoFetch => {
                 crate::settings::update(cx, |s| s.auto_fetch = !s.auto_fetch);
                 let on = cx.global::<crate::settings::Settings>().auto_fetch;
@@ -746,8 +789,11 @@ impl Workspace {
             Cmd::Sync => self.remote(RemoteOp::Sync, cx),
             Cmd::SyncRebase => {
                 if !self.head.has_upstream {
-                    self.error =
-                        Some("This branch has no upstream. Use Publish Branch first.".to_string());
+                    {
+                        let message: String =
+                            ("This branch has no upstream. Use Publish Branch first.").into();
+                        self.report_warning(message, cx);
+                    }
                     cx.notify();
                 } else {
                     self.run_background(
@@ -892,7 +938,7 @@ impl Workspace {
                 this.busy = None;
                 match result {
                     Ok(()) => this.flash(done, cx),
-                    Err(e) => this.error = Some(format!("{e:#}")),
+                    Err(e) => this.report_error(format!("{e:#}"), cx),
                 }
                 this.refresh(cx);
             })
@@ -938,7 +984,7 @@ impl Workspace {
             return;
         }
         if self.has_unsaved() {
-            self.error = Some(super::workspace::UNSAVED_BEFORE_COMMIT.into());
+            self.report_warning(super::workspace::UNSAVED_BEFORE_COMMIT, cx);
             cx.notify();
             return;
         }
@@ -952,11 +998,14 @@ impl Workspace {
             _ => self.staged.is_empty() && self.unstaged.is_empty(),
         };
         if nothing && !options.amend && !options.allow_empty {
-            self.error = Some(if self.unstaged.is_empty() {
-                "There are no changes to commit.".into()
-            } else {
-                "No staged changes. Stage files with +, or use Git: Commit All.".into()
-            });
+            self.report_warning(
+                if self.unstaged.is_empty() {
+                    "There are no changes to commit.".to_string()
+                } else {
+                    "No staged changes. Stage files with +, or use Git: Commit All.".to_string()
+                },
+                cx,
+            );
             cx.notify();
             return;
         }
@@ -1034,7 +1083,7 @@ impl Workspace {
                 );
             }
             Err(e) => {
-                self.error = Some(format!("{e:#}"));
+                self.report_error(format!("{e:#}"), cx);
                 cx.notify();
             }
         }
@@ -1050,8 +1099,11 @@ impl Workspace {
         let remotes = repo.remotes().unwrap_or_default();
         match remotes.as_slice() {
             [] => {
-                self.error =
-                    Some("This repository has no remotes. Use Git: Add Remote… first.".into());
+                {
+                    let message: String =
+                        ("This repository has no remotes. Use Git: Add Remote… first.").into();
+                    self.report_warning(message, cx);
+                }
                 cx.notify();
             }
             [only] => then(self, only.clone(), window, cx),
@@ -1119,7 +1171,7 @@ impl Workspace {
         let stashes = match repo.stashes() {
             Ok(s) => s,
             Err(e) => {
-                self.error = Some(format!("{e:#}"));
+                self.report_error(format!("{e:#}"), cx);
                 cx.notify();
                 return;
             }
@@ -1167,7 +1219,7 @@ impl Workspace {
     }
 
     fn need_file(&mut self, verb: &str, cx: &mut Context<Self>) {
-        self.error = Some(format!("Open a file's changes first to {verb} it."));
+        self.report_warning(format!("Open a file's changes first to {verb} it."), cx);
         cx.notify();
     }
 
