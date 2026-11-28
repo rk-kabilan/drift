@@ -240,7 +240,9 @@ impl Workspace {
     fn status_bar_app_items(&mut self, mut bar: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
         let t = cx.theme().clone();
         let fg = t.on_accent;
-        if let Some(update) = cx.global::<crate::update::Available>().0.clone() {
+        use crate::update::Offer;
+        let offer = crate::update::offer(cx);
+        if let Offer::Page(update) = offer {
             bar = bar.child(
                 item("sb-update")
                     .cursor_pointer()
@@ -249,8 +251,23 @@ impl Workspace {
                     .tooltip(tooltip("Open the download page"))
                     .on_click(move |_, _, cx| cx.open_url(&update.url)),
             );
+        } else if let Offer::Restart(version) = offer {
+            bar = bar.child(
+                item("sb-update")
+                    .cursor_pointer()
+                    .child(icon_sized("update", 14., fg))
+                    .child("Restart to Update")
+                    .tooltip(tooltip(format!(
+                        "Drift {version} is installed. Restart to start it."
+                    )))
+                    .on_click(|_, _, cx| super::workspace::restart(cx)),
+            );
         } else {
-            let checking = self.checking_updates;
+            let downloading = match &offer {
+                Offer::Downloading(v) => Some(v.clone()),
+                _ => None,
+            };
+            let checking = self.checking_updates || downloading.is_some();
             let update_icon = svg()
                 .path("icons/update.svg")
                 .size(px(14.))
@@ -272,7 +289,12 @@ impl Workspace {
                 item("sb-check-updates")
                     .when(!checking, |d| d.cursor_pointer())
                     .child(update_icon)
-                    .tooltip(tooltip(if checking {
+                    .when_some(downloading.clone(), |d, v| {
+                        d.child(format!("Downloading Drift {v}…"))
+                    })
+                    .tooltip(tooltip(if let Some(v) = &downloading {
+                        format!("Downloading Drift {v}. It installs by itself; restart when it's ready.")
+                    } else if checking {
                         "Checking for updates…".to_string()
                     } else {
                         format!(

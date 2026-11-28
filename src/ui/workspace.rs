@@ -141,6 +141,16 @@ pub(super) fn activate_repo_window(root: &std::path::Path, cx: &mut gpui::App) -
 
 /// Quits after every window with unsaved edits has been asked about, one at a time.
 pub fn quit(cx: &mut gpui::App) {
+    quit_then(false, cx);
+}
+
+/// Quits as [`quit`] does, then starts the updated Drift on the repository of
+/// the front window.
+pub fn restart(cx: &mut gpui::App) {
+    quit_then(true, cx);
+}
+
+fn quit_then(relaunch: bool, cx: &mut gpui::App) {
     let unsaved = cx.windows().into_iter().find_map(|handle| {
         let ws = handle.downcast::<Workspace>()?;
         ws.read(cx).is_ok_and(|w| w.has_unsaved()).then_some(ws)
@@ -150,11 +160,25 @@ pub fn quit(cx: &mut gpui::App) {
             ws.update(cx, |this, window, cx| {
                 window.activate_window();
                 // Saved or discarded: look at the next window. Cancel stops here.
-                this.confirm_unsaved(window, cx, |_, _, cx| cx.defer(quit));
+                this.confirm_unsaved(window, cx, move |_, _, cx| {
+                    cx.defer(move |cx| quit_then(relaunch, cx))
+                });
             })
             .ok();
         }
-        None => cx.quit(),
+        None => {
+            if relaunch {
+                let root = cx
+                    .active_window()
+                    .or_else(|| cx.windows().into_iter().next())
+                    .and_then(|w| w.downcast::<Workspace>())
+                    .and_then(|ws| ws.read(cx).ok())
+                    .filter(|w| w.repo.is_some())
+                    .map(|w| w.root.clone());
+                crate::update::relaunch(root.as_deref());
+            }
+            cx.quit()
+        }
     }
 }
 

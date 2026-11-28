@@ -80,7 +80,7 @@ The tests run first, and the packages build only if they pass. The workflow stop
 
 Open Settings with `Cmd+,` / `Ctrl+,`, the gear in the status bar, or "Settings: Open Settings" in the command palette.
 
-- **General**: theme (System, Light or Dark; the sun/moon button in the status bar switches too), word wrap, the history graph, background fetch (on by default, every 5 seconds; the interval can be changed or fetching turned off) and the automatic update check.
+- **General**: theme (System, Light or Dark; the sun/moon button in the status bar switches too), word wrap, the history graph, background fetch (on by default, every 5 seconds; the interval can be changed or fetching turned off) and the automatic update check. A new version downloads and installs by itself; click **Restart to Update** in the status bar to start it. Copies installed from a .deb or .rpm, or in a folder Drift can't write to, link to the download page instead.
 - **Keyboard Shortcuts**: every action that can have a shortcut. Click Change and press the new keys (Esc cancels), Remove to leave an action without one, Reset to go back to the default. Shortcuts need Ctrl, Alt or Cmd, or a function key. Two actions with the same keys are flagged.
 
 Settings are saved to `settings` in the state folder (macOS `~/Library/Application Support/drift/`, Windows `%APPDATA%\drift\`, Linux `~/.local/state/drift/`), as `key=value` lines:

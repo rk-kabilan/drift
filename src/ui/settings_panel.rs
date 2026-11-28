@@ -443,17 +443,26 @@ impl Workspace {
         );
 
         let current = env!("CARGO_PKG_VERSION");
-        let update = cx.global::<crate::update::Available>().0.clone();
-        let (status, status_color) = if self.checking_updates {
-            ("Checking for updates…".to_string(), t.muted)
-        } else if let Some(u) = &update {
-            (format!("Drift {} is available.", u.version), t.accent)
-        } else {
-            ("Up to date as of the last check.".to_string(), t.muted)
+        use crate::update::Offer;
+        let offer = crate::update::offer(cx);
+        let (status, status_color) = match &offer {
+            _ if self.checking_updates => ("Checking for updates…".to_string(), t.muted),
+            Offer::Page(u) => (format!("Drift {} is available.", u.version), t.accent),
+            Offer::Downloading(v) => (format!("Downloading Drift {v}…"), t.muted),
+            Offer::Restart(v) => (
+                format!("Drift {v} is installed. Restart to start it."),
+                t.accent,
+            ),
+            Offer::None => ("Up to date as of the last check.".to_string(), t.muted),
         };
-        let check_button = match update {
-            Some(u) if !self.checking_updates => button("updates-download", "Download", true, t)
-                .on_click(move |_, _, cx| cx.open_url(&u.url)),
+        let check_button = match offer {
+            Offer::Page(u) if !self.checking_updates => {
+                button("updates-download", "Download", true, t)
+                    .on_click(move |_, _, cx| cx.open_url(&u.url))
+            }
+            Offer::Restart(_) => button("updates-restart", "Restart to Update", true, t)
+                .on_click(|_, _, cx| super::workspace::restart(cx)),
+            Offer::Downloading(_) => button("updates-check", "Check Now", false, t).opacity(0.5),
             _ => button("updates-check", "Check Now", false, t)
                 .when(self.checking_updates, |d| d.opacity(0.5))
                 .when(!self.checking_updates, |d| {
